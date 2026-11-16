@@ -1,4 +1,4 @@
--- AeroSteal v4.1 : Steal An Egg (Derin Röntgen & Remote Spy)
+-- AeroSteal v4.2 : Steal An Egg (Tek Tuşla Tüm Oyun Kodlarını Çekici)
 -- Menü: RightShift veya ekrandaki mor "A" düğmesi
 
 local Players = game:GetService("Players")
@@ -14,14 +14,12 @@ local fpp = fireproximityprompt
 
 -- ===== AYARLAR =====
 local CONFIG = {
-	RunHeight = 3.5,
-	DefaultSpeed = 70,
-	PlayerColor = Color3.fromRGB(255, 75, 75),
-	EggColor = Color3.fromRGB(255, 215, 0),
 	Accent = Color3.fromRGB(130, 95, 255),
 	DarkBg = Color3.fromRGB(18, 18, 24),
 	CardBg = Color3.fromRGB(26, 26, 36),
 	SidebarBg = Color3.fromRGB(14, 14, 20),
+	DumpFile = "AeroSteal/OyunKodlari.lua",
+	MaxScriptDump = 100, -- Tek seferde çekilecek maksimum kod sayısı
 }
 -- ====================
 
@@ -40,16 +38,10 @@ end
 local guiRoot = getGuiRoot()
 
 local state = {
-	playerEsp = false, eggEsp = false, autoSteal = false,
-	antiGuard = true, remoteSpy = true,
-	speed = CONFIG.DefaultSpeed,
-	selectedArea = "Tümü",
-	activeTab = "RemoteSpy",
+	remoteSpy = true,
+	activeTab = "Dumper",
 }
 local connections = {}
-local playerRecords = {}
-local eggRecords = {}
-local baseCFrame = nil
 local screen, statusLabel, logLabel, logScroll
 local logLines = {}
 local tabContainers = {}
@@ -96,18 +88,115 @@ local function copyText(text)
 	return (pcall(fn, text))
 end
 
--- Serileştirici
-local function enc(val)
-	if typeof(val) == "Instance" then
-		return val:GetFullName()
-	elseif type(val) == "table" then
-		local ok, s = pcall(function() return HttpService:JSONEncode(val) end)
-		return ok and s or "tablo"
+-- ==================== ⚡ TEK TUŞLA TÜM OYUN KODLARINI DÖKÜCÜ ====================
+local function dumpAllGameScripts()
+	setStatus("Tüm oyun kodları taranıyor ve decompile ediliyor, lütfen bekle...")
+	task.wait(0.1)
+
+	local output = {}
+	local header = string.rep("=", 80)
+	
+	table.insert(output, header)
+	table.insert(output, ("-- AEROSTEAL TAM OYUN KODLARI DÖKÜMÜ"))
+	table.insert(output, ("-- PlaceId: %d | GameId: %d | Zaman: %s"):format(game.PlaceId, game.GameId, os.date()))
+	table.insert(output, header .. "\n")
+
+	local roots = {
+		{ name = "ReplicatedStorage", inst = ReplicatedStorage },
+		{ name = "PlayerScripts", inst = LocalPlayer:FindFirstChildOfClass("PlayerScripts") },
+		{ name = "PlayerGui", inst = LocalPlayer:FindFirstChildOfClass("PlayerGui") },
+		{ name = "StarterPlayerScripts", inst = game:GetService("StarterPlayer"):FindFirstChild("StarterPlayerScripts") },
+	}
+
+	local scriptCount = 0
+	local decompileFn = decompile or disassemble
+
+	for _, root in ipairs(roots) do
+		if root.inst then
+			for _, desc in ipairs(root.inst:GetDescendants()) do
+				if desc:IsA("LocalScript") or desc:IsA("ModuleScript") then
+					scriptCount += 1
+					if scriptCount > CONFIG.MaxScriptDump then break end
+
+					table.insert(output, header)
+					table.insert(output, ("-- [DOSYA %d]: %s"):format(scriptCount, desc:GetFullName()))
+					table.insert(output, ("-- [TÜR]: %s | [İSİM]: %s"):format(desc.ClassName, desc.Name))
+					table.insert(output, header)
+
+					local codeExtracted = false
+
+					-- 1. YÖNTEM: Executor decompile fonksiyonu ile kaynak kodu çek
+					if typeof(decompileFn) == "function" then
+						local okDec, code = pcall(decompileFn, desc)
+						if okDec and type(code) == "string" and #code > 10 then
+							table.insert(output, code)
+							codeExtracted = true
+						end
+					end
+
+					-- 2. YÖNTEM: Eğer decompile yoksa veya hata verdiyse ve ModuleScript ise require ile içeriğini dök
+					if not codeExtracted and desc:IsA("ModuleScript") then
+						local okReq, result = pcall(require, desc)
+						if okReq then
+							table.insert(output, "-- (require ile çekilen modül içeriği):")
+							local okEnc, json = pcall(function() return HttpService:JSONEncode(result) end)
+							if okEnc then
+								table.insert(output, "return " .. json)
+							else
+								table.insert(output, "-- Modül Tablosu:")
+								if type(result) == "table" then
+									for k, v in pairs(result) do
+										table.insert(output, ("  [%s] = %s"):format(tostring(k), tostring(v)))
+									end
+								else
+									table.insert(output, tostring(result))
+								end
+							end
+							codeExtracted = true
+						else
+							table.insert(output, "-- require hatası: " .. tostring(result))
+						end
+					end
+
+					if not codeExtracted then
+						table.insert(output, "-- [KOD ÇEKİLEMEDİ: Decompile fonksiyonu desteklenmiyor veya script kilitli]")
+					end
+
+					table.insert(output, "\n\n")
+				end
+			end
+		end
 	end
-	return tostring(val)
+
+	local fullText = table.concat(output, "\n")
+	local fileSize = #fullText
+
+	-- Dosyaya yaz
+	local savedToFile = false
+	if typeof(writefile) == "function" then
+		pcall(function()
+			if typeof(makefolder) == "function" and typeof(isfolder) == "function" and not isfolder("AeroSteal") then
+				makefolder("AeroSteal")
+			end
+		end)
+		local okSave = pcall(writefile, CONFIG.DumpFile, fullText)
+		savedToFile = okSave
+	end
+
+	-- Panoya kopyala
+	local copied = copyText(fullText)
+
+	log(("========== KOD DÖKÜMÜ TAMAMLANDI =========="))
+	log(("Toplam Çekilen Script: %d"):format(scriptCount))
+	log(("Boyut: %d KB"):format(math.floor(fileSize / 1024)))
+	log(savedToFile and ("Dosyaya kaydedildi: Delta/workspace/" .. CONFIG.DumpFile) or "Dosyaya yazılamadı.")
+	log(copied and "TÜM KODLAR AYRICA PANONA KOPYALANDI!" or "Pano kopyalanamadı (boyut aşıldı, dosyadan bak).")
+	log("===========================================")
+
+	setStatus(("Bitti! %d script döküldü (%d KB). Panoya kopyalandı!"):format(scriptCount, math.floor(fileSize / 1024)))
 end
 
--- ---------- 🕵️ REMOTE SPY (AĞ DİNLEYİCİSİ - ELİNLE ÇALDIĞINDA YAKALAR) ----------
+-- ==================== 🕵️ REMOTE SPY ====================
 local hookActive = false
 local function initRemoteSpy()
 	if hookActive then return end
@@ -121,86 +210,25 @@ local function initRemoteSpy()
 				local remoteName = self.Name:lower()
 				local fullPath = self:GetFullName()
 
-				-- Yumurta, çalma, taşıma veya alan ile ilgili tüm paketleri yakala
 				if string.find(remoteName, "egg") or string.find(remoteName, "carry") or string.find(remoteName, "steal")
 					or string.find(remoteName, "drop") or string.find(remoteName, "field") or string.find(fullPath:lower(), "eggworld") then
 					
 					local argStr = {}
 					for i, a in ipairs(args) do
-						argStr[#argStr + 1] = ("arg%d: %s"):format(i, enc(a))
+						local s = typeof(a) == "Instance" and a:GetFullName() or tostring(a)
+						argStr[#argStr + 1] = ("arg%d: %s"):format(i, s)
 					end
-					log(("[SPY YAKALADI!] %s -> %s\n  Parametreler: %s"):format(method, fullPath, table.concat(argStr, " | ")))
-					copyText(("[SPY YAKALADI!] %s -> %s\n  Parametreler: %s"):format(method, fullPath, table.concat(argStr, " | ")))
+					log(("[SPY YAKALADI!] %s -> %s\n  Argümanlar: %s"):format(method, fullPath, table.concat(argStr, " | ")))
+					copyText(("[SPY] %s -> %s\nArgs: %s"):format(method, fullPath, table.concat(argStr, " | ")))
 				end
 			end
 			return oldNamecall(self, ...)
 		end)
 	end)
-	if ok then
-		hookActive = true
-		log("[Remote Spy] Aktif! Şimdi elinle gidip 1 tane yumurta çal, paket anında buraya düşecek.")
-	else
-		log("[Remote Spy] Hook açılamadı: " .. tostring(err))
-	end
+	if ok then hookActive = true; log("[Spy] Ağ dinleyicisi devrede!") end
 end
 
--- ---------- 🔍 DERİN ÇEVRE RÖNTGENİ (YANINDA DURDUĞUN YERİ İNCELER) ----------
-local function deepInspectNear()
-	local char = LocalPlayer.Character
-	local root = char and char:FindFirstChild("HumanoidRootPart")
-	if not root then setStatus("Karakter yok."); return end
-
-	log("========== DERİN ÇEVRE RÖNTGENİ ==========")
-	log(("Oyuncu Konumu: (%.1f, %.1f, %.1f)"):format(root.Position.X, root.Position.Y, root.Position.Z))
-
-	-- 1. Yakındaki (25 stud) tüm ProximityPrompt'lar
-	log("-- YAKINDAKİ PROMPT'LAR --")
-	local promptCount = 0
-	for _, inst in ipairs(Workspace:GetDescendants()) do
-		if inst:IsA("ProximityPrompt") then
-			local pPos = inst.Parent and (inst.Parent:IsA("BasePart") and inst.Parent.Position or (inst.Parent:IsA("Model") and inst.Parent:GetPivot().Position))
-			if pPos then
-				local dist = (root.Position - pPos).Magnitude
-				if dist <= 25 then
-					promptCount += 1
-					log(("Prompt: %s | Action=%q Object=%q Enabled=%s Hold=%.2f Mesafe=%.1fm"):format(
-						inst:GetFullName(), inst.ActionText, inst.ObjectText, tostring(inst.Enabled), inst.HoldDuration, dist
-					))
-				end
-			end
-		end
-	end
-	if promptCount == 0 then log("25 stud içinde hiç ProximityPrompt yok.") end
-
-	-- 2. Yakındaki Modeller ve Attribute'lar
-	log("-- YAKINDAKİ NESNELER (15 stud) --")
-	for _, inst in ipairs(Workspace:GetDescendants()) do
-		if (inst:IsA("Model") or inst:IsA("BasePart")) and not inst:IsDescendantOf(char) then
-			local pPos = inst:IsA("BasePart") and inst.Position or (inst:IsA("Model") and inst:GetPivot().Position)
-			if pPos and (root.Position - pPos).Magnitude <= 15 then
-				local attrs = inst:GetAttributes()
-				local attrStr = ""
-				for k, v in pairs(attrs) do attrStr = attrStr .. tostring(k) .. "=" .. tostring(v) .. "; " end
-				if attrStr ~= "" or string.find(inst.Name:lower(), "egg") or string.find(inst.Name:lower(), "spot") then
-					log(("[%s] %s | Attr: %s"):format(inst.ClassName, inst:GetFullName(), attrStr ~= "" and attrStr or "yok"))
-				end
-			end
-		end
-	end
-
-	-- 3. Oyuncunun elindeki / çantasındaki nesneler
-	log("-- KARAKTER DURUMU --")
-	for _, c in ipairs(char:GetChildren()) do
-		if c:IsA("Tool") or c:IsA("Model") then
-			log(("Karakter içi: [%s] %s"):format(c.ClassName, c.Name))
-		end
-	end
-	log("========== RÖNTGEN BİTTİ ==========")
-	copyText(table.concat(logLines, "\n", #logLines - 30, #logLines))
-	setStatus("Röntgen tamamlandı, log'a yazıldı ve panoya kopyalandı!")
-end
-
--- ---------- GUI ----------
+-- ==================== GUI ====================
 local ACCENT = CONFIG.Accent
 local function corner(inst, r)
 	local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r); c.Parent = inst
@@ -232,7 +260,7 @@ mainFrame.Parent = screen
 corner(mainFrame, 10)
 stroke(mainFrame, ACCENT, 1.5)
 
--- Ekrandaki Aç/Kapa Düğmesi (A)
+-- A Butonu
 local toggleBtn = Instance.new("TextButton")
 toggleBtn.Size = UDim2.fromOffset(42, 42)
 toggleBtn.Position = UDim2.new(0, 15, 0.5, -21)
@@ -258,7 +286,7 @@ local titleText = Instance.new("TextLabel")
 titleText.Size = UDim2.new(1, -20, 1, 0)
 titleText.Position = UDim2.fromOffset(12, 0)
 titleText.BackgroundTransparency = 1
-titleText.Text = "AERO HUB  •  Derin Röntgen & Remote Spy v4.1"
+titleText.Text = "AERO HUB  •  Tüm Oyun Kodları Dökücüsü & Spy"
 titleText.TextXAlignment = Enum.TextXAlignment.Left
 titleText.Font = Enum.Font.GothamBold
 titleText.TextSize = 13
@@ -285,32 +313,28 @@ track(UserInputService.InputEnded:Connect(function(input)
 end))
 
 local sidebar = Instance.new("Frame")
-sidebar.Size = UDim2.new(0, 135, 1, -38)
+sidebar.Size = UDim2.new(0, 140, 1, -38)
 sidebar.Position = UDim2.fromOffset(0, 38)
 sidebar.BackgroundColor3 = CONFIG.SidebarBg
 sidebar.BorderSizePixel = 0
 sidebar.Parent = mainFrame
 corner(sidebar, 8)
 
-local sidebarLayout = Instance.new("UIListLayout")
-sidebarLayout.Padding = UDim.new(0, 4)
-sidebarLayout.Parent = sidebar
-local sidebarPad = Instance.new("UIPadding")
-sidebarPad.PaddingTop = UDim.new(0, 8); sidebarPad.PaddingLeft = UDim.new(0, 6); sidebarPad.PaddingRight = UDim.new(0, 6)
-sidebarPad.Parent = sidebar
+local sidebarLayout = Instance.new("UIListLayout"); sidebarLayout.Padding = UDim.new(0, 4); sidebarLayout.Parent = sidebar
+local sidebarPad = Instance.new("UIPadding"); sidebarPad.PaddingTop = UDim.new(0, 8); sidebarPad.PaddingLeft = UDim.new(0, 6); sidebarPad.PaddingRight = UDim.new(0, 6); sidebarPad.Parent = sidebar
 
 local contentArea = Instance.new("Frame")
-contentArea.Size = UDim2.new(1, -145, 1, -78)
-contentArea.Position = UDim2.fromOffset(140, 44)
+contentArea.Size = UDim2.new(1, -150, 1, -78)
+contentArea.Position = UDim2.fromOffset(145, 44)
 contentArea.BackgroundTransparency = 1
 contentArea.Parent = mainFrame
 
 statusLabel = Instance.new("TextLabel")
-statusLabel.Size = UDim2.new(1, -145, 0, 26)
-statusLabel.Position = UDim2.new(0, 140, 1, -30)
+statusLabel.Size = UDim2.new(1, -150, 0, 26)
+statusLabel.Position = UDim2.new(0, 145, 1, -30)
 statusLabel.BackgroundColor3 = CONFIG.CardBg
 statusLabel.BorderSizePixel = 0
-statusLabel.Text = "Spy Devrede. Elinle bir yumurta çal, logu buraya yapıştıracağız."
+statusLabel.Text = "Hazır. 'Tüm Oyun Kodlarını Dök'e bas."
 statusLabel.Font = Enum.Font.Gotham
 statusLabel.TextSize = 11
 statusLabel.TextColor3 = Color3.fromRGB(180, 180, 210)
@@ -321,23 +345,16 @@ local statPad = Instance.new("UIPadding"); statPad.PaddingLeft = UDim.new(0, 8);
 
 local function switchTab(tabName)
 	state.activeTab = tabName
-	for name, container in pairs(tabContainers) do
-		container.Visible = (name == tabName)
-	end
+	for name, container in pairs(tabContainers) do container.Visible = (name == tabName) end
 	for name, btn in pairs(tabButtons) do
-		if name == tabName then
-			btn.BackgroundColor3 = ACCENT
-			btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-		else
-			btn.BackgroundColor3 = Color3.fromRGB(24, 24, 34)
-			btn.TextColor3 = Color3.fromRGB(170, 170, 190)
-		end
+		btn.BackgroundColor3 = (name == tabName) and ACCENT or Color3.fromRGB(24, 24, 34)
+		btn.TextColor3 = (name == tabName) and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(170, 170, 190)
 	end
 end
 
 local function addTab(name, iconText)
 	local btn = Instance.new("TextButton")
-	btn.Size = UDim2.new(1, 0, 0, 32)
+	btn.Size = UDim2.new(1, 0, 0, 34)
 	btn.BackgroundColor3 = Color3.fromRGB(24, 24, 34)
 	btn.BorderSizePixel = 0
 	btn.Text = iconText .. " " .. name
@@ -356,23 +373,22 @@ local function addTab(name, iconText)
 	container.Visible = false
 	container.Parent = contentArea
 
-	local lay = Instance.new("UIListLayout"); lay.Padding = UDim.new(0, 6); lay.Parent = container
+	local lay = Instance.new("UIListLayout"); lay.Padding = UDim.new(0, 8); lay.Parent = container
 	local p = Instance.new("UIPadding"); p.PaddingRight = UDim.new(0, 8); p.Parent = container
 
 	tabButtons[name] = btn
 	tabContainers[name] = container
-
 	btn.MouseButton1Click:Connect(function() switchTab(name) end)
 	return container
 end
 
-local function addCardButton(container, text, callback)
+local function addCardButton(container, text, callback, height)
 	local b = Instance.new("TextButton")
-	b.Size = UDim2.new(1, 0, 0, 34)
+	b.Size = UDim2.new(1, 0, 0, height or 36)
 	b.BackgroundColor3 = CONFIG.CardBg
 	b.Text = text
 	b.Font = Enum.Font.GothamBold
-	b.TextSize = 12
+	b.TextSize = 13
 	b.TextColor3 = Color3.fromRGB(235, 235, 255)
 	b.Parent = container
 	corner(b, 6)
@@ -381,18 +397,29 @@ local function addCardButton(container, text, callback)
 	return b
 end
 
--- ==================== SEKMELER ====================
+-- ==================== SEKMELERİ DOLDUR ====================
 
--- 1. SEKME: REMOTE SPY (AĞ DİNLEYİCİSİ)
-local tabSpy = addTab("Remote Spy", "🕵️")
-addCardButton(tabSpy, "Remote Spy'ı Yeniden Başlat", safe(initRemoteSpy))
-addCardButton(tabSpy, "Yuvanın Yanında Dur & 'Derin Röntgen Çek'", safe(deepInspectNear))
+-- 1. SEKME: KOD DÖKÜCÜ (DUMPER)
+local tabDump = addTab("Kod Dökücü", "⚡")
 
--- Log Kutusu (Büyük)
+addCardButton(tabDump, "⚡ TÜM OYUN KODLARINI DÖK (Tek Tuş)", safe(dumpAllGameScripts), 44)
+
+local infoBox = Instance.new("TextLabel")
+infoBox.Size = UDim2.new(1, 0, 0, 60)
+infoBox.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
+infoBox.Text = "Bu düğmeye bastığında oyundaki tüm ModuleScript ve LocalScript'lerin içi çözülür, Delta/workspace/AeroSteal/OyunKodlari.lua dosyasına kaydedilir ve panoya kopyalanır!"
+infoBox.TextColor3 = Color3.fromRGB(160, 160, 190)
+infoBox.Font = Enum.Font.Gotham
+infoBox.TextSize = 11
+infoBox.TextWrapped = true
+infoBox.Parent = tabDump
+corner(infoBox, 6)
+
+-- Log Alanı
 local logBox = Instance.new("Frame")
-logBox.Size = UDim2.new(1, 0, 0, 170)
+logBox.Size = UDim2.new(1, 0, 0, 110)
 logBox.BackgroundColor3 = Color3.fromRGB(10, 10, 14)
-logBox.Parent = tabSpy
+logBox.Parent = tabDump
 corner(logBox, 6)
 
 logScroll = Instance.new("ScrollingFrame")
@@ -407,7 +434,7 @@ logLabel = Instance.new("TextLabel")
 logLabel.Size = UDim2.new(1, -4, 0, 0)
 logLabel.AutomaticSize = Enum.AutomaticSize.Y
 logLabel.BackgroundTransparency = 1
-logLabel.Text = "Spy bekleniyor... Oyunda bir yumurta çalınca paketler buraya akacak."
+logLabel.Text = "Loglar burada görünecek..."
 logLabel.TextWrapped = true
 logLabel.TextXAlignment = Enum.TextXAlignment.Left
 logLabel.TextYAlignment = Enum.TextYAlignment.Top
@@ -416,18 +443,17 @@ logLabel.TextSize = 11
 logLabel.TextColor3 = Color3.fromRGB(160, 255, 160)
 logLabel.Parent = logScroll
 
-addCardButton(tabSpy, "Tüm Logları Panoya Kopyala", function()
-	local ok = copyText(table.concat(logLines, "\n"))
-	setStatus(ok and "Log panoya kopyalandı!" or "Pano yok.")
-end)
+addCardButton(tabDump, "Logları Panoya Kopyala", function()
+	copyText(table.concat(logLines, "\n"))
+	setStatus("Log panoya kopyalandı.")
+end, 30)
 
 -- Varsayılan Sekme
-switchTab("Remote Spy")
+switchTab("Kod Dökücü")
 initRemoteSpy()
 
 -- Kapatma
 local function unload()
-	state.remoteSpy = false
 	for _, c in ipairs(connections) do c:Disconnect() end
 	table.clear(connections)
 	if screen then screen:Destroy(); screen = nil end
@@ -443,4 +469,4 @@ track(UserInputService.InputBegan:Connect(function(input, processed)
 	end
 end))
 
-setStatus("Remote Spy Aktif! Git elinle 1 yumurta çal, logu yakalayalım.")
+setStatus("Hazır! 'Tüm Oyun Kodlarını Dök' butonuna bas.")
