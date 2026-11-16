@@ -1,4 +1,4 @@
--- AeroSteal v3.4 : Steal An Egg (Hızlı Koşu & Süzülme Motoru - Işınlanmasız)
+-- AeroSteal v4.0 : Steal An Egg (Modern Tabbed UI, Anti-Guard & Smooth Runner)
 -- Menü: RightShift veya ekrandaki mor "A" düğmesi
 
 local Players = game:GetService("Players")
@@ -13,16 +13,19 @@ local fpp = fireproximityprompt
 
 -- ===== AYARLAR =====
 local CONFIG = {
-	RunHeight = 4.0,           -- Tuzaklara ve muhafızlara çarpmamak için yerden yükseklik (stud)
-	StealHoldTime = 1.25,       -- Prompt basılı tutma süresi
-	BaseDepositWait = 1.0,      -- Base'de yumurtanın teslim edilme beklemesi
-	CycleCooldown = 0.5,        -- Döngüler arası bekleme
-	DefaultSpeed = 75,          -- Koşma / Süzülme hızı (Hızlı ve güvenli)
+	RunHeight = 3.5,            -- Yerden süzülme yüksekliği (tuzakları aşmak için)
+	StealHoldTime = 1.25,        -- CarryAreaEgg hold süresi
+	BaseDepositWait = 0.8,       -- Base'de yumurta teslim süresi
+	CycleCooldown = 0.4,
+	DefaultSpeed = 70,           -- Koşma hızı
 	MinSpeed = 16,
 	MaxSpeed = 200,
-	PlayerColor = Color3.fromRGB(255, 70, 70),
-	EggColor = Color3.fromRGB(255, 220, 80),
-	Accent = Color3.fromRGB(120, 90, 255),
+	PlayerColor = Color3.fromRGB(255, 75, 75),
+	EggColor = Color3.fromRGB(255, 215, 0),
+	Accent = Color3.fromRGB(130, 95, 255),
+	DarkBg = Color3.fromRGB(18, 18, 24),
+	CardBg = Color3.fromRGB(26, 26, 36),
+	SidebarBg = Color3.fromRGB(14, 14, 20),
 }
 -- ====================
 
@@ -42,18 +45,21 @@ local guiRoot = getGuiRoot()
 
 local state = {
 	playerEsp = false, eggEsp = false, autoSteal = false,
+	antiGuard = true, godMode = false,
 	speedOn = false, speed = CONFIG.DefaultSpeed,
 	selectedArea = "Tümü",
+	activeTab = "AutoSteal",
 }
 local connections = {}
 local playerRecords = {}
 local eggRecords = {}
 local baseCFrame = nil
 local autoToken = 0
-local screen, statusLabel, logLabel, logScroll, areaBtn
+local screen, statusLabel, logLabel, logScroll
 local logLines = {}
 local nestIndex = 1
-local currentTween = nil
+local tabContainers = {}
+local tabButtons = {}
 
 local function track(conn) connections[#connections + 1] = conn; return conn end
 
@@ -64,7 +70,7 @@ local function refreshLog()
 	for i = #logLines, 1, -1 do
 		local l = logLines[i]
 		total += #l + 1
-		if total > 12000 or #parts >= 200 then break end
+		if total > 10000 or #parts >= 150 then break end
 		parts[#parts + 1] = l
 	end
 	local n = #parts
@@ -79,8 +85,8 @@ local function log(text)
 	text = tostring(text)
 	print("[AeroSteal] " .. text)
 	logLines[#logLines + 1] = text
-	if #logLines > 1000 then
-		logLines = table.move(logLines, #logLines - 799, #logLines, 1, {})
+	if #logLines > 800 then
+		logLines = table.move(logLines, #logLines - 599, #logLines, 1, {})
 	end
 end
 
@@ -121,49 +127,83 @@ local function noclipChar()
 	end
 end
 
--- ---------- YÜKSEK HIZLI SÜZÜLME / KOŞMA (IŞINLANMASIZ) ----------
-local function glideTo(targetCF)
+-- ---------- 🛡️ ANTİ-GUARD SİSTEMİ (ÖLÜMSÜZLÜK & MUHAFIZ ETKİSİZLEŞTİRME) ----------
+local function neutralizeGuards()
+	if not state.antiGuard then return end
+	local guardAreas = Workspace:FindFirstChild("World")
+		and Workspace.World:FindFirstChild("Areas")
+		and Workspace.World.Areas:FindFirstChild("GuardAreas")
+
+	if guardAreas then
+		for _, desc in ipairs(guardAreas:GetDescendants()) do
+			-- Muhafızların Collider, Hitbox ve TouchInterest'lerini kapat
+			if desc.Name == "Collider" or desc.Name == "HumanoidMass" or string.find(desc.Name:lower(), "hitbox") then
+				if desc:IsA("BasePart") then
+					desc.CanTouch = false
+					desc.CanCollide = false
+					desc.CanQuery = false
+				end
+			elseif desc:IsA("TouchTransmitter") then
+				desc:Destroy()
+			elseif desc:IsA("Humanoid") and desc.Parent and string.find(desc.Parent.Name:lower(), "guard") then
+				-- Muhafızın saldırmasını engelle
+				desc.WalkSpeed = 0
+			end
+		end
+	end
+
+	-- Yerdeki tuzakları da (PlayerTrap) etkisizleştir
+	local transient = Workspace:FindFirstChild("Transient")
+	if transient then
+		for _, trap in ipairs(transient:GetChildren()) do
+			if string.find(trap.Name:lower(), "trap") then
+				for _, p in ipairs(trap:GetDescendants()) do
+					if p:IsA("BasePart") then
+						p.CanTouch = false
+						p.CanCollide = false
+					end
+				end
+			end
+		end
+	end
+end
+
+track(RunService.Stepped:Connect(function()
+	if state.autoSteal then noclipChar() end
+	if state.antiGuard then neutralizeGuards() end
+end))
+
+-- ---------- KESİNTİSİZ AKICI KOŞU MOTORU (IŞINLANMA YOK!) ----------
+local function smoothRunTo(targetPos)
 	local char, hum, root = getCharacter()
 	if not char then return false, "Karakter yok." end
 
-	local dist = (root.Position - targetCF.Position).Magnitude
 	local speed = math.clamp(state.speed, 20, 200)
-	local duration = math.clamp(dist / speed, 0.1, 15)
 
-	-- Karakteri hedefe doğru çevir
-	local lookTarget = CFrame.lookAt(targetCF.Position, targetCF.Position + root.CFrame.LookVector)
-
-	local tweenInfo = TweenInfo.new(duration, Enum.EasingStyle.Linear)
-	currentTween = TweenService:Create(root, tweenInfo, { CFrame = targetCF })
-
-	local completed = false
-	local c1 = currentTween.Completed:Connect(function() completed = true end)
-
-	currentTween:Play()
-
-	-- Yol boyunca noclip yap ve ölmeyi denetle
-	while not completed do
-		if not state.autoSteal then
-			currentTween:Cancel()
-			break
-		end
+	while state.autoSteal do
 		local c, h, r = getCharacter()
-		if not c or h.Health <= 0 then
-			currentTween:Cancel()
+		if not c or h.Health <= 0 then return false, "Karakter öldü." end
+
+		local currentPos = r.Position
+		local diff = targetPos - currentPos
+		local dist = diff.Magnitude
+
+		if dist <= 3.5 then
+			r.AssemblyLinearVelocity = Vector3.zero
 			break
 		end
-		noclipChar()
+
+		local step = math.min(dist, speed * 0.03)
+		local newPos = currentPos + (diff.Unit * step)
+
+		r.CFrame = CFrame.lookAt(newPos, newPos + diff.Unit)
 		r.AssemblyLinearVelocity = Vector3.zero
-		task.wait(0.05)
+		noclipChar()
+
+		task.wait(0.03)
 	end
 
-	c1:Disconnect()
-	currentTween = nil
-
-	local c2, h2, r2 = getCharacter()
-	if not c2 or h2.Health <= 0 then return false, "Karakter hareket sırasında öldü." end
-
-	return true, "Hedefe ulaşıldı."
+	return true, "Varıldı."
 end
 
 -- ---------- ESP ----------
@@ -172,7 +212,7 @@ local function makeMarker(adornee, color)
 	gui.Name = "AeroMarker"
 	gui.Adornee = adornee
 	gui.AlwaysOnTop = true
-	gui.Size = UDim2.fromOffset(190, 22)
+	gui.Size = UDim2.fromOffset(160, 20)
 	gui.StudsOffset = Vector3.new(0, 3, 0)
 	local label = Instance.new("TextLabel")
 	label.BackgroundTransparency = 1
@@ -180,7 +220,7 @@ local function makeMarker(adornee, color)
 	label.TextColor3 = color
 	label.TextStrokeTransparency = 0.3
 	label.Font = Enum.Font.GothamBold
-	label.TextSize = 13
+	label.TextSize = 12
 	label.Text = ""
 	label.Parent = gui
 	gui.Parent = guiRoot
@@ -205,7 +245,7 @@ local function refreshPlayer(plr)
 		if not root or not root:IsA("BasePart") or not state.playerEsp or playerRecords[plr] then return end
 		local hl = Instance.new("Highlight")
 		hl.FillColor = CONFIG.PlayerColor
-		hl.FillTransparency = 0.75
+		hl.FillTransparency = 0.7
 		hl.OutlineColor = CONFIG.PlayerColor
 		hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
 		hl.Parent = char
@@ -287,7 +327,7 @@ local function getAllNests()
 	return nests
 end
 
--- ---------- ÇALMA DÖNGÜSÜ (KOŞARAK / SÜZÜLEREK) ----------
+-- ---------- ÇALMA DÖNGÜSÜ ----------
 local function stealCycle()
 	local char, hum, root = getCharacter()
 	if not char then return false, "Karakter hazır değil." end
@@ -302,14 +342,14 @@ local function stealCycle()
 	local targetNumber = nestIndex
 	nestIndex = (nestIndex % #nests) + 1
 
-	-- Yuvaya hafif yukarıdan süzülerek git (Tuzaklara takılmamak için +CONFIG.RunHeight)
-	local targetCF = CFrame.new(currentTarget.pos + Vector3.new(0, CONFIG.RunHeight, 0))
+	-- Yerden 3.5 stud yüksekten süzülerek hedefe git
+	local targetPos = currentTarget.pos + Vector3.new(0, CONFIG.RunHeight, 0)
 
-	setStatus(("Yuva %d/%d doğru hızlı koşuluyor..."):format(targetNumber, #nests))
-	local okRun, whyRun = glideTo(targetCF)
+	setStatus(("Yuva %d/%d doğru akıcı koşuluyor..."):format(targetNumber, #nests))
+	local okRun, whyRun = smoothRunTo(targetPos)
 	if not okRun then return false, "Yuvaya ulaşılamadı: " .. whyRun end
 
-	task.wait(0.2)
+	task.wait(0.15)
 
 	-- Prompt'u bul
 	local stealPrompt = nil
@@ -333,13 +373,13 @@ local function stealCycle()
 		end
 	end
 
-	-- Yuva boşsa hemen sıradakine koş
+	-- Yuva boşsa anında sıradakine geç
 	if not stealPrompt then
-		setStatus(("Yuva %d boş, sıradakine koşuluyor..."):format(targetNumber))
+		setStatus(("Yuva %d boş çıktı, sıradakine koşuluyor..."):format(targetNumber))
 		return true, "Boş yuva atlandı."
 	end
 
-	-- Yumurta var! Çal
+	-- Yumurta var! Çalmayı başlat
 	setStatus(("Yuva %d DOLU! Yumurta çalınıyor..."):format(targetNumber))
 	if typeof(fpp) == "function" then
 		fpp(stealPrompt)
@@ -351,21 +391,15 @@ local function stealCycle()
 		local rf = net and net:FindFirstChild("RF/EggWorld/AskFieldEggCarry")
 		if rf then rf:InvokeServer(currentTarget.inst) end
 	end)
-	task.wait(0.2)
+	task.wait(0.15)
 
-	-- Karakter hayatta mı kontrol et
-	local c2, h2 = getCharacter()
-	if not c2 or h2.Health <= 0 then
-		return false, "Çalma anında öldü, yeniden doğuluyor..."
-	end
-
-	-- Base'e doğru yüksek hızla geri koş/süzül
-	setStatus("Base'e doğru hızlı koşuluyor...")
-	local okBack, whyBack = glideTo(baseCFrame + Vector3.new(0, 1.5, 0))
+	-- Base'e doğru akıcı koş
+	setStatus("Base'e koşuluyor...")
+	local okBack, whyBack = smoothRunTo(baseCFrame.Position + Vector3.new(0, 1.5, 0))
 	if not okBack then return false, "Base'e dönülemedi: " .. whyBack end
 
-	-- Base'de yumurtayı teslim et
-	setStatus("Base'de yumurta teslim ediliyor...")
+	-- Base teslimatı
+	setStatus("Yumurta teslim ediliyor...")
 	pcall(function()
 		local net = ReplicatedStorage:FindFirstChild("Packages") and ReplicatedStorage.Packages:FindFirstChild("Networking")
 		local rfDrop = net and net:FindFirstChild("RF/EggWorld/AskFieldEggDrop")
@@ -373,7 +407,7 @@ local function stealCycle()
 	end)
 	task.wait(CONFIG.BaseDepositWait)
 
-	return true, ("Yumurta başarıyla çalındı ve base'e getirildi! (Yuva %d)"):format(targetNumber)
+	return true, ("Yumurta getirildi! (Yuva %d)"):format(targetNumber)
 end
 
 local function setAutoSteal(on)
@@ -381,7 +415,6 @@ local function setAutoSteal(on)
 	local token = autoToken
 	if not on then
 		state.autoSteal = false
-		if currentTween then currentTween:Cancel() end
 		setStatus("Auto Steal durduruldu.")
 		return false
 	end
@@ -406,7 +439,7 @@ local function setAutoSteal(on)
 	return true
 end
 
--- ---------- GUI ----------
+-- ---------- 🎨 MODERN DİKDÖRTGEN SEKME GUI ----------
 local ACCENT = CONFIG.Accent
 local function corner(inst, r)
 	local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r); c.Parent = inst
@@ -429,51 +462,61 @@ screen.ResetOnSpawn = false
 screen.DisplayOrder = 999
 screen.Parent = guiRoot
 
-local window = Instance.new("Frame")
-window.Size = UDim2.new(0, 330, 0.78, 0)
-window.Position = UDim2.new(0.5, -165, 0.1, 0)
-window.BackgroundColor3 = Color3.fromRGB(18, 18, 26)
-window.BorderSizePixel = 0
-window.Parent = screen
-corner(window, 12)
-stroke(window, ACCENT, 1.5)
+-- Ana Dikdörtgen Pencere (520x330)
+local mainFrame = Instance.new("Frame")
+mainFrame.Size = UDim2.fromOffset(520, 330)
+mainFrame.Position = UDim2.new(0.5, -260, 0.5, -165)
+mainFrame.BackgroundColor3 = CONFIG.DarkBg
+mainFrame.BorderSizePixel = 0
+mainFrame.Parent = screen
+corner(mainFrame, 10)
+stroke(mainFrame, ACCENT, 1.5)
 
+-- Ekrandaki Aç/Kapa Düğmesi (A)
 local toggleBtn = Instance.new("TextButton")
-toggleBtn.Size = UDim2.fromOffset(44, 44)
-toggleBtn.Position = UDim2.new(0, 12, 0.5, -22)
-toggleBtn.BackgroundColor3 = Color3.fromRGB(26, 26, 38)
+toggleBtn.Size = UDim2.fromOffset(42, 42)
+toggleBtn.Position = UDim2.new(0, 15, 0.5, -21)
+toggleBtn.BackgroundColor3 = CONFIG.SidebarBg
 toggleBtn.BorderSizePixel = 0
 toggleBtn.Text = "A"
 toggleBtn.Font = Enum.Font.GothamBold
 toggleBtn.TextSize = 20
 toggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
 toggleBtn.Parent = screen
-corner(toggleBtn, 22)
+corner(toggleBtn, 21)
 stroke(toggleBtn, ACCENT, 1.5)
-toggleBtn.MouseButton1Click:Connect(function() window.Visible = not window.Visible end)
+toggleBtn.MouseButton1Click:Connect(function() mainFrame.Visible = not mainFrame.Visible end)
 
-local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, 0, 0, 42)
-title.BackgroundColor3 = Color3.fromRGB(26, 26, 38)
-title.BorderSizePixel = 0
-title.Text = "  AERO  •  Steal An Egg v3.4 GLIDE"
-title.TextXAlignment = Enum.TextXAlignment.Left
-title.Font = Enum.Font.GothamBold
-title.TextSize = 15
-title.TextColor3 = Color3.fromRGB(255, 255, 255)
-title.Parent = window
-corner(title, 12)
+-- Üst Başlık Çubuğu
+local topBar = Instance.new("Frame")
+topBar.Size = UDim2.new(1, 0, 0, 38)
+topBar.BackgroundColor3 = CONFIG.SidebarBg
+topBar.BorderSizePixel = 0
+topBar.Parent = mainFrame
+corner(topBar, 10)
 
+local titleText = Instance.new("TextLabel")
+titleText.Size = UDim2.new(1, -20, 1, 0)
+titleText.Position = UDim2.fromOffset(12, 0)
+titleText.BackgroundTransparency = 1
+titleText.Text = "AERO HUB  •  Steal An Egg v4.0 PRO"
+titleText.TextXAlignment = Enum.TextXAlignment.Left
+titleText.Font = Enum.Font.GothamBold
+titleText.TextSize = 14
+titleText.TextColor3 = Color3.fromRGB(255, 255, 255)
+titleText.Parent = topBar
+
+-- Sürükleme
 local dragging, dragStart, startPos = false, nil, nil
-title.InputBegan:Connect(function(input)
+topBar.InputBegan:Connect(function(input)
 	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-		dragging = true; dragStart = input.Position; startPos = window.Position
+		dragging = true; dragStart = input.Position; startPos = mainFrame.Position
 	end
 end)
 track(UserInputService.InputChanged:Connect(function(input)
 	if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
 		local d = input.Position - dragStart
-		window.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+		mainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
 	end
 end))
 track(UserInputService.InputEnded:Connect(function(input)
@@ -482,174 +525,238 @@ track(UserInputService.InputEnded:Connect(function(input)
 	end
 end))
 
-local content = Instance.new("ScrollingFrame")
-content.Position = UDim2.fromOffset(0, 48)
-content.Size = UDim2.new(1, 0, 1, -84)
-content.BackgroundTransparency = 1
-content.ScrollBarThickness = 4
-content.AutomaticCanvasSize = Enum.AutomaticSize.Y
-content.Parent = window
-local layout = Instance.new("UIListLayout")
-layout.Padding = UDim.new(0, 8)
-layout.Parent = content
-local pad = Instance.new("UIPadding")
-pad.PaddingLeft = UDim.new(0, 12); pad.PaddingRight = UDim.new(0, 12); pad.PaddingTop = UDim.new(0, 4)
-pad.Parent = content
+-- Sol Kenar Çubuğu (Kategoriler)
+local sidebar = Instance.new("Frame")
+sidebar.Size = UDim2.new(0, 135, 1, -38)
+sidebar.Position = UDim2.fromOffset(0, 38)
+sidebar.BackgroundColor3 = CONFIG.SidebarBg
+sidebar.BorderSizePixel = 0
+sidebar.Parent = mainFrame
+corner(sidebar, 8)
 
+local sidebarLayout = Instance.new("UIListLayout")
+sidebarLayout.Padding = UDim.new(0, 4)
+sidebarLayout.Parent = sidebar
+local sidebarPad = Instance.new("UIPadding")
+sidebarPad.PaddingTop = UDim.new(0, 8); sidebarPad.PaddingLeft = UDim.new(0, 6); sidebarPad.PaddingRight = UDim.new(0, 6)
+sidebarPad.Parent = sidebar
+
+-- Sağ İçerik Alanı
+local contentArea = Instance.new("Frame")
+contentArea.Size = UDim2.new(1, -145, 1, -78)
+contentArea.Position = UDim2.fromOffset(140, 44)
+contentArea.BackgroundTransparency = 1
+contentArea.Parent = mainFrame
+
+-- Alt Durum Çubuğu
 statusLabel = Instance.new("TextLabel")
-statusLabel.Size = UDim2.new(1, -16, 0, 30)
-statusLabel.Position = UDim2.new(0, 8, 1, -34)
-statusLabel.BackgroundColor3 = Color3.fromRGB(26, 26, 38)
+statusLabel.Size = UDim2.new(1, -145, 0, 26)
+statusLabel.Position = UDim2.new(0, 140, 1, -30)
+statusLabel.BackgroundColor3 = CONFIG.CardBg
 statusLabel.BorderSizePixel = 0
 statusLabel.Text = "Hazır. Base'de durup 'Base Konumunu Kaydet'e bas."
-statusLabel.TextWrapped = true
 statusLabel.Font = Enum.Font.Gotham
-statusLabel.TextSize = 12
-statusLabel.TextColor3 = Color3.fromRGB(190, 190, 215)
-statusLabel.Parent = window
-corner(statusLabel, 8)
+statusLabel.TextSize = 11
+statusLabel.TextColor3 = Color3.fromRGB(180, 180, 210)
+statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+statusLabel.Parent = mainFrame
+corner(statusLabel, 6)
+local statPad = Instance.new("UIPadding"); statPad.PaddingLeft = UDim.new(0, 8); statPad.Parent = statusLabel
 
-local function addHeader(text)
-	local l = Instance.new("TextLabel")
-	l.Size = UDim2.new(1, 0, 0, 20)
-	l.BackgroundTransparency = 1
-	l.Text = text
-	l.TextXAlignment = Enum.TextXAlignment.Left
-	l.Font = Enum.Font.GothamBold
-	l.TextSize = 12
-	l.TextColor3 = ACCENT
-	l.Parent = content
+-- Sekme Değiştirme Fonksiyonu
+local function switchTab(tabName)
+	state.activeTab = tabName
+	for name, container in pairs(tabContainers) do
+		container.Visible = (name == tabName)
+	end
+	for name, btn in pairs(tabButtons) do
+		if name == tabName then
+			btn.BackgroundColor3 = ACCENT
+			btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+		else
+			btn.BackgroundColor3 = Color3.fromRGB(24, 24, 34)
+			btn.TextColor3 = Color3.fromRGB(170, 170, 190)
+		end
+	end
 end
 
-local function addToggle(text, callback)
+local function addTab(name, iconText)
+	local btn = Instance.new("TextButton")
+	btn.Size = UDim2.new(1, 0, 0, 32)
+	btn.BackgroundColor3 = Color3.fromRGB(24, 24, 34)
+	btn.BorderSizePixel = 0
+	btn.Text = iconText .. " " .. name
+	btn.Font = Enum.Font.GothamBold
+	btn.TextSize = 12
+	btn.TextColor3 = Color3.fromRGB(170, 170, 190)
+	btn.Parent = sidebar
+	corner(btn, 6)
+
+	local container = Instance.new("ScrollingFrame")
+	container.Size = UDim2.new(1, 0, 1, 0)
+	container.BackgroundTransparency = 1
+	container.BorderSizePixel = 0
+	container.ScrollBarThickness = 4
+	container.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	container.Visible = false
+	container.Parent = contentArea
+
+	local lay = Instance.new("UIListLayout"); lay.Padding = UDim.new(0, 6); lay.Parent = container
+	local p = Instance.new("UIPadding"); p.PaddingRight = UDim.new(0, 8); p.Parent = container
+
+	tabButtons[name] = btn
+	tabContainers[name] = container
+
+	btn.MouseButton1Click:Connect(function() switchTab(name) end)
+	return container
+end
+
+-- Arayüz Bileşen Üreticileri
+local function addCardToggle(container, text, callback, defaultOn)
 	local row = Instance.new("Frame")
-	row.Size = UDim2.new(1, 0, 0, 36)
-	row.BackgroundColor3 = Color3.fromRGB(30, 30, 42)
-	row.Parent = content
-	corner(row, 8)
+	row.Size = UDim2.new(1, 0, 0, 34)
+	row.BackgroundColor3 = CONFIG.CardBg
+	row.Parent = container
+	corner(row, 6)
 	local lbl = Instance.new("TextLabel")
 	lbl.BackgroundTransparency = 1
-	lbl.Size = UDim2.new(1, -70, 1, 0)
-	lbl.Position = UDim2.fromOffset(12, 0)
+	lbl.Size = UDim2.new(1, -60, 1, 0)
+	lbl.Position = UDim2.fromOffset(10, 0)
 	lbl.Text = text
 	lbl.TextXAlignment = Enum.TextXAlignment.Left
 	lbl.Font = Enum.Font.Gotham
-	lbl.TextSize = 14
+	lbl.TextSize = 13
 	lbl.TextColor3 = Color3.fromRGB(235, 235, 245)
 	lbl.Parent = row
+
 	local pill = Instance.new("TextButton")
-	pill.Size = UDim2.fromOffset(44, 22)
-	pill.Position = UDim2.new(1, -56, 0.5, -11)
+	pill.Size = UDim2.fromOffset(40, 20)
+	pill.Position = UDim2.new(1, -48, 0.5, -10)
 	pill.Text = ""
 	pill.AutoButtonColor = false
 	pill.Parent = row
-	corner(pill, 11)
+	corner(pill, 10)
 	local knob = Instance.new("Frame")
-	knob.Size = UDim2.fromOffset(16, 16)
-	knob.Position = UDim2.fromOffset(3, 3)
+	knob.Size = UDim2.fromOffset(14, 14)
+	knob.Position = defaultOn and UDim2.fromOffset(23, 3) or UDim2.fromOffset(3, 3)
 	knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
 	knob.Parent = pill
-	corner(knob, 8)
-	local on = false
-	local function render()
-		pill.BackgroundColor3 = on and ACCENT or Color3.fromRGB(70, 70, 90)
-		TweenService:Create(knob, TweenInfo.new(0.12), { Position = on and UDim2.fromOffset(25, 3) or UDim2.fromOffset(3, 3) }):Play()
-	end
+	corner(knob, 7)
+
+	local on = defaultOn or false
+	pill.BackgroundColor3 = on and ACCENT or Color3.fromRGB(60, 60, 75)
+
 	pill.MouseButton1Click:Connect(function()
-		local want = not on
-		local result = callback(want)
-		if result ~= nil then want = result end
-		on = want
-		render()
+		on = not on
+		pill.BackgroundColor3 = on and ACCENT or Color3.fromRGB(60, 60, 75)
+		TweenService:Create(knob, TweenInfo.new(0.1), { Position = on and UDim2.fromOffset(23, 3) or UDim2.fromOffset(3, 3) }):Play()
+		callback(on)
 	end)
-	render()
 end
 
-local function addButton(text, callback)
+local function addCardButton(container, text, callback)
 	local b = Instance.new("TextButton")
-	b.Size = UDim2.new(1, 0, 0, 34)
-	b.BackgroundColor3 = Color3.fromRGB(40, 36, 70)
+	b.Size = UDim2.new(1, 0, 0, 32)
+	b.BackgroundColor3 = CONFIG.CardBg
 	b.Text = text
 	b.Font = Enum.Font.GothamBold
-	b.TextSize = 13
+	b.TextSize = 12
 	b.TextColor3 = Color3.fromRGB(235, 235, 255)
-	b.Parent = content
-	corner(b, 8)
+	b.Parent = container
+	corner(b, 6)
 	stroke(b, ACCENT, 1)
 	b.MouseButton1Click:Connect(callback)
 	return b
 end
 
-local function addTextBox(placeholder, onCommit)
+local function addCardTextBox(container, placeholder, onCommit)
 	local tb = Instance.new("TextBox")
-	tb.Size = UDim2.new(1, 0, 0, 34)
-	tb.BackgroundColor3 = Color3.fromRGB(30, 30, 42)
+	tb.Size = UDim2.new(1, 0, 0, 32)
+	tb.BackgroundColor3 = CONFIG.CardBg
 	tb.PlaceholderText = placeholder
-	tb.PlaceholderColor3 = Color3.fromRGB(120, 120, 145)
+	tb.PlaceholderColor3 = Color3.fromRGB(120, 120, 140)
 	tb.Text = ""
-	tb.ClearTextOnFocus = false
 	tb.Font = Enum.Font.Gotham
-	tb.TextSize = 13
-	tb.TextColor3 = Color3.fromRGB(235, 235, 245)
-	tb.TextXAlignment = Enum.TextXAlignment.Left
-	tb.Parent = content
-	corner(tb, 8)
+	tb.TextSize = 12
+	tb.TextColor3 = Color3.fromRGB(240, 240, 255)
+	tb.Parent = container
+	corner(tb, 6)
 	local p = Instance.new("UIPadding"); p.PaddingLeft = UDim.new(0, 10); p.Parent = tb
 	tb.FocusLost:Connect(function() onCommit(tb.Text) end)
 end
 
--- Butonlar
-addHeader("BÖLGE SEÇİMİ")
-local availableAreas = getAvailableAreas()
-local areaIndex = 1
-areaBtn = addButton("Hedef Bölge: " .. state.selectedArea, function()
-	availableAreas = getAvailableAreas()
-	areaIndex = (areaIndex % #availableAreas) + 1
-	state.selectedArea = availableAreas[areaIndex]
-	areaBtn.Text = "Hedef Bölge: " .. state.selectedArea
-	nestIndex = 1
-	setStatus("Seçilen bölge: " .. state.selectedArea)
-end)
+-- ==================== SEKMELERİ OLUŞTUR ====================
 
-addHeader("AUTO STEAL (HIZLI KOŞU & SÜZÜLME)")
-addButton("1. Base Konumunu Kaydet (Base'de Dur)", function()
+-- 1. SEKME: AUTO STEAL
+local tabAuto = addTab("Auto Steal", "🥚")
+local availableAreas = getAvailableAreas()
+local areaIdx = 1
+local areaSelectBtn = addCardButton(tabAuto, "Hedef Bölge: " .. state.selectedArea, function()
+	availableAreas = getAvailableAreas()
+	areaIdx = (areaIdx % #availableAreas) + 1
+	state.selectedArea = availableAreas[areaIdx]
+	areaSelectBtn.Text = "Hedef Bölge: " .. state.selectedArea
+	nestIndex = 1
+	setStatus("Bölge seçildi: " .. state.selectedArea)
+end)
+addCardButton(tabAuto, "Base Konumunu Kaydet (Base'de Dur)", function()
 	local _, _, root = getCharacter()
 	if not root then setStatus("Karakter yok."); return end
 	baseCFrame = root.CFrame
 	setStatus("Base kaydedildi! Şimdi Auto Steal'i açabilirsin.")
 end)
-addButton("Base'e Koş/Süzül", safe(function()
+addCardButton(tabAuto, "Base'e Akıcı Koş", safe(function()
 	if baseCFrame == nil then setStatus("Önce base konumunu kaydet."); return end
-	glideTo(baseCFrame)
+	smoothRunTo(baseCFrame.Position + Vector3.new(0, 1.5, 0))
 end))
-addTextBox(("Koşu Hızı (Şu an: %d)"):format(state.speed), function(text)
-	local n = tonumber(text)
+addCardToggle(tabAuto, "AUTO STEAL (Akıcı Koş & Çal)", function(on) setAutoSteal(on) end, false)
+
+-- 2. SEKME: ANTİ-GUARD (GÜVENLİK)
+local tabGuard = addTab("Anti-Guard", "🛡️")
+addCardToggle(tabGuard, "Anti-Guard & Tuzak İptali (Ölümsüzlük)", function(on)
+	state.antiGuard = on
+	setStatus(on and "Anti-Guard devrede (Muhafızlar etkisiz)." or "Anti-Guard kapatıldı.")
+end, true)
+addCardButton(tabGuard, "Tüm Muhafızları Şimdi Etkisizleştir", safe(neutralizeGuards))
+
+-- 3. SEKME: HIZ & HAREKET
+local tabMove = addTab("Hareket", "⚡")
+addCardTextBox(tabMove, ("Koşu Hızı Ayarla (Şu an: %d)"):format(state.speed), function(txt)
+	local n = tonumber(txt)
 	if n then
 		state.speed = math.clamp(n, CONFIG.MinSpeed, CONFIG.MaxSpeed)
-		setStatus(("Koşu hızı ayarlandı: %d"):format(state.speed))
+		setStatus(("Hız ayarlandı: %d"):format(state.speed))
 	end
 end)
-addToggle("AUTO STEAL (Ölmeden Hızlı Koş & Çal)", function(on) return setAutoSteal(on) end)
+addCardToggle(tabMove, "Karakter WalkSpeed Hilesi", function(on)
+	state.speedOn = on
+	local _, hum = getCharacter()
+	if hum then hum.WalkSpeed = on and state.speed or 16 end
+end, false)
 
-addHeader("GÖRÜNÜM")
-addToggle("Oyuncu ESP", function(on) setPlayerEsp(on) end)
-addToggle("Yuva ESP", function(on) setEggEsp(on) end)
+-- 4. SEKME: ESP & GÖRÜNÜM
+local tabEsp = addTab("Görünüm", "👁️")
+addCardToggle(tabEsp, "Oyuncu ESP", function(on) setPlayerEsp(on) end, false)
+addCardToggle(tabEsp, "Yuva ESP", function(on) setEggEsp(on) end, false)
 
-addHeader("LOG")
-local logFrame = Instance.new("Frame")
-logFrame.Size = UDim2.new(1, 0, 0, 130)
-logFrame.BackgroundColor3 = Color3.fromRGB(12, 12, 18)
-logFrame.Parent = content
-corner(logFrame, 8)
+-- 5. SEKME: LOGLAR
+local tabLog = addTab("Loglar", "📜")
+local logBox = Instance.new("Frame")
+logBox.Size = UDim2.new(1, 0, 0, 160)
+logBox.BackgroundColor3 = Color3.fromRGB(12, 12, 16)
+logBox.Parent = tabLog
+corner(logBox, 6)
+
 logScroll = Instance.new("ScrollingFrame")
-logScroll.Size = UDim2.new(1, -8, 1, -8)
-logScroll.Position = UDim2.fromOffset(4, 4)
+logScroll.Size = UDim2.new(1, -6, 1, -6)
+logScroll.Position = UDim2.fromOffset(3, 3)
 logScroll.BackgroundTransparency = 1
 logScroll.ScrollBarThickness = 4
 logScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-logScroll.Parent = logFrame
+logScroll.Parent = logBox
+
 logLabel = Instance.new("TextLabel")
-logLabel.Size = UDim2.new(1, -6, 0, 0)
+logLabel.Size = UDim2.new(1, -4, 0, 0)
 logLabel.AutomaticSize = Enum.AutomaticSize.Y
 logLabel.BackgroundTransparency = 1
 logLabel.Text = ""
@@ -658,18 +765,21 @@ logLabel.TextXAlignment = Enum.TextXAlignment.Left
 logLabel.TextYAlignment = Enum.TextYAlignment.Top
 logLabel.Font = Enum.Font.Code
 logLabel.TextSize = 11
-logLabel.TextColor3 = Color3.fromRGB(190, 220, 190)
+logLabel.TextColor3 = Color3.fromRGB(180, 220, 180)
 logLabel.Parent = logScroll
 
-addButton("Log'u Kopyala", function()
+addCardButton(tabLog, "Log'u Panoya Kopyala", function()
 	local ok = copyText(table.concat(logLines, "\n"))
-	setStatus(ok and "Log panoya kopyalandı." or "Pano yok.")
+	setStatus(ok and "Log panoya kopyalandı." or "Pano fonksiyonu yok.")
 end)
 
+-- Varsayılan Sekmeyi Aç
+switchTab("Auto Steal")
+
+-- Kapatma Fonksiyonu
 local function unload()
 	autoToken += 1
 	state.autoSteal = false
-	if currentTween then currentTween:Cancel() end
 	setEggEsp(false)
 	setPlayerEsp(false)
 	for _, c in ipairs(connections) do c:Disconnect() end
@@ -680,13 +790,12 @@ local function unload()
 end
 env.__AeroSteal = unload
 
-addButton("Kapat (Unload)", unload)
-
+-- Kısayollar
 track(UserInputService.InputBegan:Connect(function(input, processed)
 	if processed then return end
 	if input.KeyCode == Enum.KeyCode.RightShift and screen then
-		window.Visible = not window.Visible
+		mainFrame.Visible = not mainFrame.Visible
 	end
 end))
 
-setStatus("Hazır. Base'de durup 'Base Konumunu Kaydet'e bas.")
+setStatus("AERO v4.0 Yüklendi! Base'de durup 'Base Konumunu Kaydet'e bas.")
