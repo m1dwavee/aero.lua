@@ -1,4 +1,4 @@
--- AeroSteal v2.2 : Steal An Egg helper (Luau, executor ortamı)
+-- AeroSteal v2.3 : Steal An Egg helper (Luau, executor ortamı)
 -- RightShift veya ekrandaki "A" düğmesi: pencereyi gizle/göster
 
 local Players = game:GetService("Players")
@@ -7,6 +7,7 @@ local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 local TweenService = game:GetService("TweenService")
+local HttpService = game:GetService("HttpService")
 
 local LocalPlayer = Players.LocalPlayer
 local fpp = fireproximityprompt -- executor fonksiyonu, yoksa nil
@@ -14,17 +15,24 @@ local fpp = fireproximityprompt -- executor fonksiyonu, yoksa nil
 -- ===== CONFIG: nil = unset (bilinmiyor). Doğrulanmadan doldurma. =====
 local CONFIG = {
 	ExpectedPlaceId = nil,       -- unset
-	EggKeywords = { "egg" },     -- tahmin: dökümden doğrula
+	EggKeywords = { "egg" },     -- tahmin: veriden doğrula
 	NestKeywords = { "nest" },   -- tahmin
+	DataKeywords = { "egg", "pet", "rarity", "nest", "hatch" }, -- ReplicatedStorage taraması için (tahmin)
 	MaxScan = 60000,
 	MaxEggMarkers = 150,
-	MaxDumpLines = 300,
+	MaxGroups = 120,
+	MaxLogLines = 300,
+	MaxModules = 15,
+	MaxSerializeDepth = 4,
+	MaxSerializeNodes = 4000,
+	SaveFolder = "AeroSteal",
+	SaveFile = "AeroSteal/eggdata.json",
 	UpdateInterval = 0.1,
 	RequirePrompt = true,        -- tahmin: çalma ProximityPrompt ile
 	TeleportYOffset = 3,
 	TeleportSettle = 0.25,
-	TeleportVerifyDelay = 0.3,   -- ışınlanma sonrası kontrol gecikmesi (sn)
-	TeleportTolerance = 6,       -- hedefe bu kadar studs yakınsa başarılı say
+	TeleportVerifyDelay = 0.3,
+	TeleportTolerance = 6,
 	StealTimeout = 3,
 	CycleCooldown = 1.5,
 	DefaultSpeed = 32,           -- kalibre edilmedi: Roblox varsayılanı 16
@@ -68,13 +76,51 @@ local eggRecords = {}
 local eggCount = 0
 local baseCFrame = nil
 local autoToken = 0
-local screen, statusLabel
+local screen, statusLabel, logLabel, logScroll
+local logLines = {}
+local eggData = nil
+local lastModules = {}
+local snapshotA = nil
 
 local function track(conn) connections[#connections + 1] = conn; return conn end
 
-local function setStatus(text)
+-- ---------- log ----------
+local function refreshLog()
+	if not logLabel then return end
+	local parts, total = {}, 0
+	for i = #logLines, 1, -1 do
+		local l = logLines[i]
+		total += #l + 1
+		if total > 14000 or #parts >= CONFIG.MaxLogLines then break end
+		parts[#parts + 1] = l
+	end
+	local n = #parts
+	for i = 1, math.floor(n / 2) do
+		parts[i], parts[n - i + 1] = parts[n - i + 1], parts[i]
+	end
+	logLabel.Text = table.concat(parts, "\n")
+	if logScroll then logScroll.CanvasPosition = Vector2.new(0, 1000000) end
+end
+
+local function log(text)
+	text = tostring(text)
 	print("[AeroSteal] " .. text)
+	logLines[#logLines + 1] = text
+	if #logLines > 2500 then
+		logLines = table.move(logLines, #logLines - 1999, #logLines, 1, {})
+	end
+end
+
+local function setStatus(text)
+	log(text)
 	if statusLabel then statusLabel.Text = text end
+	refreshLog()
+end
+
+local function copyText(text)
+	local fn = setclipboard or toclipboard
+	if typeof(fn) ~= "function" then return false end
+	return (pcall(fn, text))
 end
 
 -- ---------- saf yardımcılar ----------
@@ -84,6 +130,10 @@ local function nameMatches(name, keywords)
 		if string.find(lower, k, 1, true) then return true end
 	end
 	return false
+end
+
+local function isEggOrNest(name)
+	return nameMatches(name, CONFIG.EggKeywords) or nameMatches(name, CONFIG.NestKeywords)
 end
 
 local function isFinite(v) return v == v and v ~= math.huge and v ~= -math.huge end
@@ -148,6 +198,63 @@ local function makeMarker(adornee, color)
 	return gui, label
 end
 
+-- ---------- JSON'a uygun serileştirme ----------
+local function newCtx() return { seen = {}, nodes = 0 } end
+
+local function serialize(value, depth, ctx)
+	local t = typeof(value)
+	ctx.nodes += 1
+	if ctx.nodes > CONFIG.MaxSerializeNodes then return "<bütçe aşıldı>" end
+	if t == "boolean" then return value end
+	if t == "number" then
+		if value ~= value or value == math.huge or value == -math.huge then return tostring(value) end
+		return value
+	end
+	if t == "string" then
+		if not utf8.len(value) then return "<geçersiz utf8>" end
+		local cut = utf8.offset(value, 201)
+		if cut then return string.sub(value, 1, cut - 1) .. "..." end
+		return value
+	end
+	if t == "Instance" then
+		local ok, name = pcall(function() return value:GetFullName() end)
+		return "Instance:" .. (ok and name or tostring(value))
+	end
+	if t == "table" then
+		if ctx.seen[value] then return "<döngü>" end
+		if depth >= CONFIG.MaxSerializeDepth then return "<derin>" end
+		ctx.seen[value] = true
+		local count, numeric, maxIndex = 0, 0, 0
+		for k in pairs(value) do
+			count += 1
+			if type(k) == "number" and k >= 1 and k == math.floor(k) then
+				numeric += 1
+				if k > maxIndex then maxIndex = k end
+			end
+		end
+		local out = {}
+		if count > 0 and numeric == count and maxIndex == count then
+			for i = 1, math.min(count, 60) do
+				out[i] = serialize(value[i], depth + 1, ctx)
+			end
+		else
+			local n = 0
+			for k, v in pairs(value) do
+				n += 1
+				if n > 60 then out["..."] = "kesildi"; break end
+				out[tostring(k)] = serialize(v, depth + 1, ctx)
+			end
+		end
+		ctx.seen[value] = nil
+		return out
+	end
+	return tostring(value)
+end
+
+local function attributesOf(inst)
+	return serialize(inst:GetAttributes(), 0, newCtx())
+end
+
 -- ---------- ışınlanma (sonucu doğrular) ----------
 local function teleportTo(cf)
 	if not validPosition(cf.Position) then return false, "Geçersiz hedef konumu." end
@@ -160,7 +267,6 @@ local function teleportTo(cf)
 		return (r.Position - cf.Position).Magnitude
 	end
 
-	-- yöntem 1: PivotTo
 	char:PivotTo(cf)
 	root.AssemblyLinearVelocity = Vector3.zero
 	root.AssemblyAngularVelocity = Vector3.zero
@@ -169,7 +275,6 @@ local function teleportTo(cf)
 	if d == nil then return false, "Karakter ışınlanma sırasında kayboldu." end
 	if d <= CONFIG.TeleportTolerance then return true, "ok" end
 
-	-- yöntem 2: doğrudan CFrame
 	local _, _, r2 = getCharacter()
 	if r2 then
 		r2.CFrame = cf
@@ -268,7 +373,7 @@ end
 local function considerEgg(inst)
 	if eggRecords[inst] or eggCount >= CONFIG.MaxEggMarkers then return end
 	if not (inst:IsA("Model") or inst:IsA("BasePart")) then return end
-	if not (nameMatches(inst.Name, CONFIG.EggKeywords) or nameMatches(inst.Name, CONFIG.NestKeywords)) then return end
+	if not isEggOrNest(inst.Name) then return end
 	if insideAnyCharacter(inst) then return end
 	local adornee = adorneeFor(inst)
 	if not adornee then return end
@@ -297,45 +402,298 @@ local function setEggEsp(on)
 	end
 end
 
--- ---------- keşif dökümü ----------
-local function dump()
-	print("========== AeroSteal DISCOVERY ==========")
-	print(("PlaceId=%d GameId=%d"):format(game.PlaceId, game.GameId))
-
-	local lines, scanned = 0, 0
-	print("-- Workspace adayları (egg/nest) --")
+-- ---------- tam teşhis ----------
+local function fullDiag()
+	local startIdx = #logLines + 1
+	log("========== TAM TEŞHİS ==========")
+	log(("PlaceId=%d GameId=%d"):format(game.PlaceId, game.GameId))
+	log("== PROXIMITYPROMPT (en fazla 80) ==")
+	local scanned, promptShown, promptTotal, clickShown = 0, 0, 0, 0
+	local groups, groupList = {}, {}
 	for _, inst in ipairs(Workspace:GetDescendants()) do
 		scanned += 1
-		if scanned > CONFIG.MaxScan or lines >= CONFIG.MaxDumpLines then break end
-		if nameMatches(inst.Name, CONFIG.EggKeywords) or nameMatches(inst.Name, CONFIG.NestKeywords) then
-			print(("[%s] %s"):format(inst.ClassName, inst:GetFullName()))
-			lines += 1
-		end
-	end
-
-	print("-- ProximityPrompt'lar --")
-	lines, scanned = 0, 0
-	for _, inst in ipairs(Workspace:GetDescendants()) do
-		scanned += 1
-		if scanned > CONFIG.MaxScan or lines >= CONFIG.MaxDumpLines then break end
+		if scanned > CONFIG.MaxScan then log("(tarama sınırı aşıldı)"); break end
 		if inst:IsA("ProximityPrompt") then
-			print(("[Prompt] %s | Action=%q Object=%q Enabled=%s"):format(
-				inst:GetFullName(), inst.ActionText, inst.ObjectText, tostring(inst.Enabled)))
-			lines += 1
+			promptTotal += 1
+			if promptShown < 80 then
+				promptShown += 1
+				log(("[Prompt] %s | Action=%q Object=%q Enabled=%s Hold=%s"):format(
+					inst:GetFullName(), inst.ActionText, inst.ObjectText, tostring(inst.Enabled), tostring(inst.HoldDuration)))
+			end
+		elseif inst:IsA("ClickDetector") and clickShown < 40 then
+			clickShown += 1
+			log(("[ClickDetector] %s"):format(inst:GetFullName()))
+		end
+		if (inst:IsA("Model") or inst:IsA("BasePart")) and isEggOrNest(inst.Name) then
+			local key = inst.ClassName .. "|" .. inst.Name
+			local g = groups[key]
+			if not g then
+				g = { key = key, count = 0, example = inst:GetFullName() }
+				groups[key] = g
+				groupList[#groupList + 1] = g
+			end
+			g.count += 1
+		end
+	end
+	log(("Toplam prompt: %d"):format(promptTotal))
+
+	log("== EGG/NEST ADAYLARI (isme göre grup, en fazla 40) ==")
+	table.sort(groupList, function(a, b) return a.count > b.count end)
+	for i = 1, math.min(#groupList, 40) do
+		local g = groupList[i]
+		log(("%dx %s | örnek: %s"):format(g.count, g.key, g.example))
+	end
+
+	log("== REMOTE'LAR (en fazla 150) ==")
+	local remoteCount = 0
+	for _, inst in ipairs(ReplicatedStorage:GetDescendants()) do
+		if remoteCount >= 150 then break end
+		if inst:IsA("RemoteEvent") or inst:IsA("RemoteFunction") or inst:IsA("UnreliableRemoteEvent") then
+			remoteCount += 1
+			log(("[%s] %s"):format(inst.ClassName, inst:GetFullName()))
 		end
 	end
 
-	print("-- ReplicatedStorage remote'ları --")
-	lines = 0
-	for _, inst in ipairs(ReplicatedStorage:GetDescendants()) do
-		if lines >= CONFIG.MaxDumpLines then break end
-		if inst:IsA("RemoteEvent") or inst:IsA("RemoteFunction") or inst:IsA("UnreliableRemoteEvent") then
-			print(("[%s] %s"):format(inst.ClassName, inst:GetFullName()))
-			lines += 1
+	log("== KARAKTER DURUMU ==")
+	local char = LocalPlayer.Character
+	if char then
+		for i, c in ipairs(char:GetChildren()) do
+			if i > 60 then log("(kesildi)"); break end
+			log(("  [%s] %s"):format(c.ClassName, c.Name))
+		end
+		for k, v in pairs(char:GetAttributes()) do
+			log(("  Character attribute: %s = %s"):format(tostring(k), tostring(v)))
+		end
+	else
+		log("Karakter yok.")
+	end
+	local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+	if backpack then
+		log("Backpack:")
+		for _, c in ipairs(backpack:GetChildren()) do log(("  [%s] %s"):format(c.ClassName, c.Name)) end
+	end
+	for k, v in pairs(LocalPlayer:GetAttributes()) do
+		log(("Player attribute: %s = %s"):format(tostring(k), tostring(v)))
+	end
+	log("========== BİTTİ ==========")
+	local copied = copyText(table.concat(logLines, "\n", startIdx, #logLines))
+	setStatus(copied and "Teşhis bitti, panoya kopyalandı." or "Teşhis bitti (pano yok, log panelinden kopyala).")
+end
+
+-- ---------- durum farkı (egg elde mi?) ----------
+local function snapshotState()
+	local s = {}
+	local char = LocalPlayer.Character
+	if char then
+		for _, c in ipairs(char:GetChildren()) do s["char:" .. c.ClassName .. ":" .. c.Name] = "var" end
+		for k, v in pairs(char:GetAttributes()) do s["charattr:" .. tostring(k)] = tostring(v) end
+	end
+	local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+	if bp then
+		for _, c in ipairs(bp:GetChildren()) do s["backpack:" .. c.ClassName .. ":" .. c.Name] = "var" end
+	end
+	for k, v in pairs(LocalPlayer:GetAttributes()) do s["plrattr:" .. tostring(k)] = tostring(v) end
+	for _, c in ipairs(LocalPlayer:GetChildren()) do
+		if c:IsA("ValueBase") then s["plrvalue:" .. c.Name] = tostring(c.Value) end
+		if c.Name == "leaderstats" then
+			for _, v in ipairs(c:GetChildren()) do
+				if v:IsA("ValueBase") then s["leader:" .. v.Name] = tostring(v.Value) end
+			end
 		end
 	end
-	print("========== END ==========")
-	setStatus("Döküm konsola yazıldı.")
+	return s
+end
+
+local function diffStates(a, b)
+	local lines = {}
+	for k, v in pairs(b) do
+		if a[k] == nil then lines[#lines + 1] = "+ " .. k .. " = " .. v
+		elseif a[k] ~= v then lines[#lines + 1] = "~ " .. k .. ": " .. a[k] .. " -> " .. v end
+	end
+	for k in pairs(a) do
+		if b[k] == nil then lines[#lines + 1] = "- " .. k end
+	end
+	table.sort(lines)
+	return lines
+end
+
+local function takeSnapshotA()
+	snapshotA = snapshotState()
+	setStatus("Durum A kaydedildi. Egg'i al, sonra 'Durum B + fark'a bas.")
+end
+
+local function takeSnapshotB()
+	if not snapshotA then setStatus("Önce 'Durum A al' düğmesine bas."); return end
+	local diff = diffStates(snapshotA, snapshotState())
+	log("== DURUM FARKI (A -> B) ==")
+	if #diff == 0 then
+		log("Fark yok: egg karakterde, çantada, attribute'larda ve leaderstats'ta görünmüyor.")
+	else
+		for _, l in ipairs(diff) do log(l) end
+	end
+	setStatus(("Fark satırı: %d (log'a bak)."):format(#diff))
+end
+
+-- ---------- egg verisi toplama ----------
+local function describeInstance(inst)
+	local info = { attributes = attributesOf(inst), values = {}, texts = {} }
+	local n = 0
+	for _, d in ipairs(inst:GetDescendants()) do
+		n += 1
+		if n > 300 then break end
+		if d:IsA("ValueBase") then
+			if #info.values < 20 then info.values[#info.values + 1] = d.Name .. "=" .. tostring(d.Value) end
+		elseif d:IsA("TextLabel") or d:IsA("TextButton") then
+			if d.Text ~= "" and #info.texts < 12 then info.texts[#info.texts + 1] = d.Name .. ": " .. d.Text end
+		elseif d:IsA("ProximityPrompt") and not info.prompt then
+			info.prompt = { path = d:GetFullName(), action = d.ActionText, object = d.ObjectText, enabled = d.Enabled }
+		end
+	end
+	return info
+end
+
+local function collectWorkspaceEggs()
+	local groups, list = {}, {}
+	local scanned = 0
+	for _, inst in ipairs(Workspace:GetDescendants()) do
+		scanned += 1
+		if scanned > CONFIG.MaxScan then break end
+		if (inst:IsA("Model") or inst:IsA("BasePart")) and isEggOrNest(inst.Name) and not insideAnyCharacter(inst) then
+			local key = inst.ClassName .. "|" .. inst.Name
+			local g = groups[key]
+			if not g then
+				if #list < CONFIG.MaxGroups then
+					local info = describeInstance(inst)
+					g = {
+						className = inst.ClassName, name = inst.Name, count = 0,
+						example = inst:GetFullName(),
+						attributes = info.attributes, values = info.values,
+						texts = info.texts, prompt = info.prompt,
+					}
+					groups[key] = g
+					list[#list + 1] = g
+				end
+			end
+			if g then g.count += 1 end
+		end
+	end
+	table.sort(list, function(a, b) return a.count > b.count end)
+	return list
+end
+
+local function collectReplicated()
+	local result = { folders = {}, modules = {}, other = {} }
+	local moduleInstances = {}
+	local scanned = 0
+	for _, inst in ipairs(ReplicatedStorage:GetDescendants()) do
+		scanned += 1
+		if scanned > CONFIG.MaxScan then break end
+		if inst:IsA("ModuleScript") then
+			if nameMatches(inst.Name, CONFIG.DataKeywords) and #result.modules < 60 then
+				result.modules[#result.modules + 1] = inst:GetFullName()
+				moduleInstances[#moduleInstances + 1] = inst
+			end
+		elseif (inst:IsA("Folder") or inst:IsA("Configuration")) and nameMatches(inst.Name, CONFIG.DataKeywords) then
+			if #result.folders < 40 then
+				local kids = {}
+				for i, c in ipairs(inst:GetChildren()) do
+					if i > 150 then kids[#kids + 1] = "(kesildi)"; break end
+					kids[#kids + 1] = ("[%s] %s"):format(c.ClassName, c.Name)
+				end
+				result.folders[#result.folders + 1] = { path = inst:GetFullName(), children = kids }
+			end
+		elseif (inst:IsA("Model") or inst:IsA("BasePart") or inst:IsA("ValueBase"))
+			and nameMatches(inst.Name, CONFIG.DataKeywords) and #result.other < 80 then
+			result.other[#result.other + 1] = {
+				path = inst:GetFullName(), className = inst.ClassName, attributes = attributesOf(inst),
+			}
+		end
+	end
+	return result, moduleInstances
+end
+
+local function saveData()
+	if not eggData then setStatus("Önce 'Egg verisini topla' düğmesine bas."); return end
+	local okEnc, json = pcall(function() return HttpService:JSONEncode(eggData) end)
+	if not okEnc then
+		log("JSON hatası: " .. tostring(json))
+		setStatus("Veri JSON'a çevrilemedi (log'a bak).")
+		return
+	end
+	local copied = copyText(json)
+	local saved, saveErr = false, nil
+	if typeof(writefile) == "function" then
+		pcall(function()
+			if typeof(isfolder) == "function" and typeof(makefolder) == "function" and not isfolder(CONFIG.SaveFolder) then
+				makefolder(CONFIG.SaveFolder)
+			end
+		end)
+		saved, saveErr = pcall(writefile, CONFIG.SaveFile, json)
+	end
+	local parts = {}
+	parts[#parts + 1] = saved and ("Kaydedildi: " .. CONFIG.SaveFile) or ("Dosyaya yazılamadı" .. (saveErr and (": " .. tostring(saveErr)) or " (writefile yok)"))
+	parts[#parts + 1] = copied and "JSON panoya kopyalandı" or "pano yok"
+	parts[#parts + 1] = ("%d byte"):format(#json)
+	setStatus(table.concat(parts, " | "))
+end
+
+local function collectEggData()
+	setStatus("Egg verisi toplanıyor...")
+	local ws = collectWorkspaceEggs()
+	local rep, moduleInstances = collectReplicated()
+	lastModules = moduleInstances
+	eggData = {
+		meta = {
+			placeId = game.PlaceId, gameId = game.GameId, time = os.time(), tool = "AeroSteal v2.3",
+			note = "isim eşleşmesine dayalı, doğrulanmamış",
+		},
+		workspaceEggs = ws,
+		replicated = rep,
+	}
+	log(("Workspace egg grubu: %d | RS klasör: %d | RS modül: %d | RS diğer: %d"):format(
+		#ws, #rep.folders, #rep.modules, #rep.other))
+	for i = 1, math.min(#ws, 15) do
+		log(("  %dx %s | attr/değer/yazı: %s"):format(ws[i].count, ws[i].name,
+			(next(ws[i].attributes) ~= nil or #ws[i].values > 0 or #ws[i].texts > 0) and "var" or "yok"))
+	end
+	saveData()
+end
+
+local function readModules()
+	if not eggData then setStatus("Önce 'Egg verisini topla' düğmesine bas."); return end
+	if #lastModules == 0 then setStatus("Okunacak aday modül bulunamadı."); return end
+	log("Modüller require ile okunuyor (modülün kodu çalışır).")
+	local out = {}
+	local read = 0
+	for _, m in ipairs(lastModules) do
+		if read >= CONFIG.MaxModules then break end
+		read += 1
+		local ok, res = pcall(require, m)
+		if ok then
+			out[m:GetFullName()] = serialize(res, 0, newCtx())
+			log("  ok: " .. m:GetFullName())
+		else
+			out[m:GetFullName()] = "require hatası: " .. tostring(res)
+			log("  hata: " .. m:GetFullName())
+		end
+	end
+	eggData.modules = out
+	saveData()
+end
+
+local function loadSummary()
+	if typeof(readfile) ~= "function" or typeof(isfile) ~= "function" then
+		setStatus("Bu executor'da readfile/isfile yok.")
+		return
+	end
+	if not isfile(CONFIG.SaveFile) then setStatus("Kayıtlı veri yok: " .. CONFIG.SaveFile); return end
+	local ok, data = pcall(function() return HttpService:JSONDecode(readfile(CONFIG.SaveFile)) end)
+	if not ok or type(data) ~= "table" then setStatus("Kayıtlı veri okunamadı."); return end
+	local ws = type(data.workspaceEggs) == "table" and #data.workspaceEggs or 0
+	local mods = 0
+	if type(data.modules) == "table" then for _ in pairs(data.modules) do mods += 1 end end
+	log(("Kayıtlı veri: PlaceId=%s zaman=%s"):format(tostring(data.meta and data.meta.placeId), tostring(data.meta and data.meta.time)))
+	setStatus(("Kayıt: %d egg grubu, %d okunmuş modül."):format(ws, mods))
 end
 
 -- ---------- otomatik çalma ----------
@@ -346,9 +704,7 @@ local function pickTarget(myPos)
 	for _, inst in ipairs(Workspace:GetDescendants()) do
 		scanned += 1
 		if scanned > CONFIG.MaxScan then break end
-		if (inst:IsA("Model") or inst:IsA("BasePart"))
-			and (nameMatches(inst.Name, CONFIG.EggKeywords) or nameMatches(inst.Name, CONFIG.NestKeywords))
-			and not insideAnyCharacter(inst) then
+		if (inst:IsA("Model") or inst:IsA("BasePart")) and isEggOrNest(inst.Name) and not insideAnyCharacter(inst) then
 			stats.matched += 1
 			local prompt = findPrompt(inst)
 			if prompt then stats.withPrompt += 1 end
@@ -373,7 +729,7 @@ local function pickTarget(myPos)
 end
 
 local function noTargetMessage(stats)
-	return ("Uygun egg yok (isim eşleşen: %d, prompt'lu: %d). Keşif dökümüne bak."):format(stats.matched, stats.withPrompt)
+	return ("Uygun egg yok (isim eşleşen: %d, prompt'lu: %d). 'Tam teşhis'e bak."):format(stats.matched, stats.withPrompt)
 end
 
 local function previewTarget()
@@ -485,7 +841,7 @@ local function unload()
 	setPlayerEsp(false)
 	for _, c in ipairs(connections) do c:Disconnect() end
 	table.clear(connections)
-	statusLabel = nil
+	statusLabel, logLabel, logScroll = nil, nil, nil
 	if screen then screen:Destroy(); screen = nil end
 	env.__AeroSteal = nil
 	print("[AeroSteal] kapatıldı.")
@@ -499,6 +855,15 @@ local function corner(inst, r)
 end
 local function stroke(inst, color, th)
 	local s = Instance.new("UIStroke"); s.Color = color; s.Thickness = th; s.Parent = inst
+end
+
+local function safe(fn)
+	return function()
+		task.spawn(function()
+			local ok, err = pcall(fn)
+			if not ok then setStatus("Hata: " .. tostring(err)) end
+		end)
+	end
 end
 
 screen = Instance.new("ScreenGui")
@@ -706,13 +1071,11 @@ addButton("Base konumunu kaydet (base'de dur)", function()
 	baseCFrame = root.CFrame
 	setStatus("Base konumu kaydedildi.")
 end)
-addButton("Base'e ışınlan", function()
+addButton("Base'e ışınlan", safe(function()
 	if baseCFrame == nil then setStatus("Önce base konumunu kaydet."); return end
-	task.spawn(function()
-		local ok, why = teleportTo(baseCFrame)
-		setStatus(ok and "Base'e ışınlandın." or ("Base'e ışınlanma başarısız: " .. why))
-	end)
-end)
+	local ok, why = teleportTo(baseCFrame)
+	setStatus(ok and "Base'e ışınlandın." or ("Base'e ışınlanma başarısız: " .. why))
+end))
 addTextBox(("Hız değeri (%d-%d)"):format(CONFIG.MinSpeed, CONFIG.MaxSpeed), function(text)
 	local n = tonumber(text)
 	if not n or not isFinite(n) then setStatus("Geçersiz hız değeri."); return end
@@ -727,11 +1090,57 @@ addTextBox("Öncelik: en iyiden en kötüye, virgülle", function(text)
 	state.priority = parsePriority(text)
 	setStatus(("Öncelik listesi: %d kayıt."):format(#state.priority))
 end)
-addButton("Hedefi önizle (ışınlanmaz)", previewTarget)
+addButton("Hedefi önizle (ışınlanmaz)", safe(previewTarget))
 addToggle("Auto Steal (en iyi egg → base)", function(on) return setAutoSteal(on) end)
 
+addHeader("VERİ TOPLAMA")
+addButton("Egg verisini topla (+kaydet, panoya)", safe(collectEggData))
+addButton("Modülleri oku (require, isteğe bağlı)", safe(readModules))
+addButton("Kayıtlı veriyi özetle", safe(loadSummary))
+addButton("Tam teşhis (log'a yazar, panoya)", safe(fullDiag))
+addButton("Durum A al (egg YOKKEN)", safe(takeSnapshotA))
+addButton("Durum B + fark (egg ELİNDEYKEN)", safe(takeSnapshotB))
+
+addHeader("LOG")
+local logFrame = Instance.new("Frame")
+logFrame.Size = UDim2.new(1, 0, 0, 220)
+logFrame.BackgroundColor3 = Color3.fromRGB(12, 12, 18)
+logFrame.BorderSizePixel = 0
+logFrame.Parent = content
+corner(logFrame, 8)
+logScroll = Instance.new("ScrollingFrame")
+logScroll.Size = UDim2.new(1, -8, 1, -8)
+logScroll.Position = UDim2.fromOffset(4, 4)
+logScroll.BackgroundTransparency = 1
+logScroll.BorderSizePixel = 0
+logScroll.ScrollBarThickness = 4
+logScroll.CanvasSize = UDim2.new()
+logScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+logScroll.Parent = logFrame
+logLabel = Instance.new("TextLabel")
+logLabel.Size = UDim2.new(1, -6, 0, 0)
+logLabel.AutomaticSize = Enum.AutomaticSize.Y
+logLabel.BackgroundTransparency = 1
+logLabel.Text = ""
+logLabel.TextWrapped = true
+logLabel.TextXAlignment = Enum.TextXAlignment.Left
+logLabel.TextYAlignment = Enum.TextYAlignment.Top
+logLabel.Font = Enum.Font.Code
+logLabel.TextSize = 11
+logLabel.TextColor3 = Color3.fromRGB(190, 220, 190)
+logLabel.Parent = logScroll
+
+addButton("Log'u kopyala", function()
+	local ok = copyText(table.concat(logLines, "\n"))
+	setStatus(ok and "Log panoya kopyalandı." or "Bu executor'da pano fonksiyonu yok.")
+end)
+addButton("Log'u temizle", function()
+	logLines = {}
+	refreshLog()
+	if statusLabel then statusLabel.Text = "Log temizlendi." end
+end)
+
 addHeader("ARAÇLAR")
-addButton("Keşif dökümü (konsola yazar)", dump)
 addButton("Kapat (unload)", unload)
 
 track(Players.PlayerAdded:Connect(hookPlayer))
@@ -745,4 +1154,4 @@ track(UserInputService.InputBegan:Connect(function(input, processed)
 	end
 end))
 
-setStatus("Hazır. Önce base'i kaydet, sonra dökümü al.")
+setStatus("Hazır. Önce 'Egg verisini topla' düğmesini dene.")
