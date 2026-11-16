@@ -1100,6 +1100,192 @@ addButton("Kayıtlı veriyi özetle", safe(loadSummary))
 addButton("Tam teşhis (log'a yazar, panoya)", safe(fullDiag))
 addButton("Durum A al (egg YOKKEN)", safe(takeSnapshotA))
 addButton("Durum B + fark (egg ELİNDEYKEN)", safe(takeSnapshotB))
+-- ===== v2.4 ek araçlar =====
+local function enc(v)
+	local ok, s = pcall(function() return HttpService:JSONEncode(v) end)
+	return ok and s or "<kodlanamadı>"
+end
+
+local function positionOf(inst)
+	if inst:IsA("Attachment") then return inst.WorldPosition end
+	local a = adorneeFor(inst)
+	return a and a.Position or nil
+end
+
+local function describeNode(inst)
+	local s = ("[%s] %s"):format(inst.ClassName, inst.Name)
+	if inst:IsA("BasePart") then
+		local p = inst.Position
+		s = s .. (" pos=(%.1f, %.1f, %.1f)"):format(p.X, p.Y, p.Z)
+	end
+	local attrs = inst:GetAttributes()
+	if next(attrs) ~= nil then s = s .. " attr=" .. enc(serialize(attrs, 0, newCtx())) end
+	return s
+end
+
+local function logTree(rootInst, maxLines)
+	local count = 0
+	local function walk(inst, depth)
+		if count >= maxLines then return end
+		count += 1
+		log(string.rep("  ", depth) .. describeNode(inst))
+		if depth >= 5 then return end
+		for _, c in ipairs(inst:GetChildren()) do
+			if count >= maxLines then log(string.rep("  ", depth + 1) .. "(kesildi)"); return end
+			walk(c, depth + 1)
+		end
+	end
+	walk(rootInst, 0)
+end
+
+local function dumpCollected()
+	if not eggData then setStatus("Önce 'Egg verisini topla' düğmesine bas."); return end
+	local startIdx = #logLines + 1
+	log("== TOPLANAN VERİ ÖZETİ ==")
+	log("-- Workspace grupları (attribute/değer/yazı olanlar) --")
+	for _, g in ipairs(eggData.workspaceEggs) do
+		local hasAttr = type(g.attributes) == "table" and next(g.attributes) ~= nil
+		if hasAttr or #g.values > 0 or #g.texts > 0 then
+			log(("%dx %s | %s"):format(g.count, g.name, g.example))
+			if hasAttr then log("  attr: " .. enc(g.attributes)) end
+			if #g.values > 0 then log("  değer: " .. table.concat(g.values, "; ")) end
+			if #g.texts > 0 then log("  yazı: " .. table.concat(g.texts, "; ")) end
+		end
+	end
+	log("-- ReplicatedStorage klasörleri --")
+	for _, f in ipairs(eggData.replicated.folders) do
+		log(f.path .. " : " .. table.concat(f.children, ", "))
+	end
+	log("-- ReplicatedStorage diğer adaylar --")
+	for _, o in ipairs(eggData.replicated.other) do
+		log(("[%s] %s"):format(o.className, o.path))
+	end
+	log("== ÖZET BİTTİ ==")
+	local copied = copyText(table.concat(logLines, "\n", startIdx, #logLines))
+	setStatus(copied and "Özet log'a yazıldı, panoya kopyalandı." or "Özet log'a yazıldı (pano yok).")
+end
+
+local function inspectNests()
+	local startIdx = #logLines + 1
+	local _, _, root = getCharacter()
+	local myPos = root and root.Position
+	local firstNests, nearNest, nearNestD, nearPoint, nearPointD
+	local scanned = 0
+	for _, inst in ipairs(Workspace:GetDescendants()) do
+		scanned += 1
+		if scanned > CONFIG.MaxScan then break end
+		local n = inst.Name
+		if n == "Nests" then
+			if not firstNests then firstNests = inst end
+		elseif n == "NestModel" or n == "EggPoint" then
+			local p = positionOf(inst)
+			local d = (p and myPos) and (p - myPos).Magnitude or math.huge
+			if n == "NestModel" then
+				if nearNest == nil or d < nearNestD then nearNest, nearNestD = inst, d end
+			else
+				if nearPoint == nil or d < nearPointD then nearPoint, nearPointD = inst, d end
+			end
+		end
+	end
+	log("== NEST İNCELEME ==")
+	if firstNests then
+		log("-- 'Nests' (ilk bulunan): " .. firstNests:GetFullName())
+		logTree(firstNests, 25)
+	else
+		log("'Nests' bulunamadı.")
+	end
+	if nearNest then
+		log(("-- En yakın 'NestModel': %s | mesafe: %s"):format(nearNest:GetFullName(),
+			nearNestD == math.huge and "bilinmiyor" or string.format("%.0f m", nearNestD)))
+		logTree(nearNest, 60)
+	else
+		log("'NestModel' bulunamadı.")
+	end
+	if nearPoint then
+		log(("-- En yakın 'EggPoint': %s | mesafe: %s"):format(nearPoint:GetFullName(),
+			nearPointD == math.huge and "bilinmiyor" or string.format("%.0f m", nearPointD)))
+		logTree(nearPoint, 30)
+	else
+		log("'EggPoint' bulunamadı.")
+	end
+	log("== NEST İNCELEME BİTTİ ==")
+	local copied = copyText(table.concat(logLines, "\n", startIdx, #logLines))
+	setStatus(copied and "Nest incelemesi log'da, panoya kopyalandı." or "Nest incelemesi log'da (pano yok).")
+end
+
+local function insideOtherCharacter(inst)
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= LocalPlayer and plr.Character and inst:IsDescendantOf(plr.Character) then return true end
+	end
+	return false
+end
+
+local function worldSnapshot()
+	local s = {}
+	local scanned = 0
+	for _, inst in ipairs(Workspace:GetDescendants()) do
+		scanned += 1
+		if scanned > CONFIG.MaxScan then break end
+		if scanned % 5000 == 0 then task.wait() end
+		if (inst:IsA("Model") or inst:IsA("BasePart")) and not insideOtherCharacter(inst) then
+			local key = "ws:" .. inst.ClassName .. "|" .. inst.Name
+			s[key] = (s[key] or 0) + 1
+		end
+	end
+	local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+	if pg then
+		local seen = 0
+		for _, inst in ipairs(pg:GetDescendants()) do
+			if seen > 600 then break end
+			if (inst:IsA("TextLabel") or inst:IsA("TextButton")) and inst.Visible and inst.Text ~= ""
+				and not (screen and inst:IsDescendantOf(screen)) then
+				seen += 1
+				local key = "ui:" .. string.sub(inst.Text, 1, 60)
+				s[key] = (s[key] or 0) + 1
+			end
+		end
+	end
+	return s
+end
+
+local worldBefore
+local function worldA()
+	worldBefore = worldSnapshot()
+	setStatus("Dünya A kaydedildi (egg yokken). Egg'i al, sonra 'Dünya B + fark'a bas.")
+end
+
+local function worldB()
+	if not worldBefore then setStatus("Önce 'Dünya A al' düğmesine bas."); return end
+	local startIdx = #logLines + 1
+	local after = worldSnapshot()
+	local lines = {}
+	for k, v in pairs(after) do
+		local a = worldBefore[k] or 0
+		if a ~= v then lines[#lines + 1] = ("%s : %d -> %d"):format(k, a, v) end
+	end
+	for k, a in pairs(worldBefore) do
+		if after[k] == nil then lines[#lines + 1] = ("%s : %d -> 0"):format(k, a) end
+	end
+	table.sort(lines)
+	log("== DÜNYA FARKI (A -> B) ==")
+	if #lines == 0 then
+		log("Fark yok: egg Workspace'te yeni bir model olarak da, ekranda yeni bir yazı olarak da görünmüyor.")
+	else
+		for i, l in ipairs(lines) do
+			if i > 100 then log("(kesildi, toplam " .. #lines .. " satır)"); break end
+			log(l)
+		end
+		log("(ui: satırlarında para/sayaç gibi sürekli değişen yazılar gürültü olabilir)")
+	end
+	local copied = copyText(table.concat(logLines, "\n", startIdx, #logLines))
+	setStatus(("Dünya farkı: %d satır%s."):format(#lines, copied and ", panoya kopyalandı" or ""))
+end
+
+addButton("Toplanan veriyi log'a dök (özet)", safe(dumpCollected))
+addButton("Nest incele (en yakın nest/egg noktası)", safe(inspectNests))
+addButton("Dünya A al (egg YOKKEN)", safe(worldA))
+addButton("Dünya B + fark (egg ELİNDEYKEN)", safe(worldB))
+-- ===== v2.4 ek araçlar sonu =====
 
 addHeader("LOG")
 local logFrame = Instance.new("Frame")
