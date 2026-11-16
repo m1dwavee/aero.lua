@@ -1,4 +1,4 @@
--- AeroSteal v5.2 : Steal An Egg (Auto Steal & Kod Dökücü Bir Arada)
+-- AeroSteal v5.3 : Steal An Egg (Tek Tıkla İnternete Yükle & Masaüstüne Al)
 -- Menü: RightShift veya ekrandaki mor "A" düğmesi
 
 local Players = game:GetService("Players")
@@ -47,7 +47,7 @@ local state = {
 local connections = {}
 local baseCFrame = nil
 local autoToken = 0
-local screen, statusLabel, logLabel, logScroll
+local screen, statusLabel, logLabel, logScroll, linkBox
 local logLines = {}
 local nestIndex = 1
 local tabContainers = {}
@@ -104,7 +104,7 @@ local function getCharacter()
 	return nil
 end
 
--- ---------- AKICI KOŞU (YERE YAKIN, MESAFEYİ KORUR) ----------
+-- ---------- AKICI KOŞU ----------
 local function runTo(targetPos)
 	local char, hum, root = getCharacter()
 	if not char then return false end
@@ -159,14 +159,12 @@ local function stealCycle()
 	local currentIdx = nestIndex
 	nestIndex = (nestIndex % #nests) + 1
 
-	-- Yuvaya tam yer seviyesinde koş (+0.5 stud) ki prompt tetiklensin!
 	setStatus(("Yuva %d/%d koşuluyor..."):format(currentIdx, #nests))
 	local okRun = runTo(currentSpot.Position + Vector3.new(0, 0.5, 0))
 	if not okRun then return false, "Yuvaya gidilemedi." end
 
 	task.wait(0.2)
 
-	-- Prompt'u bul ve engelleri aş (Line of Sight engelini kaldır)
 	local stealPrompt = nil
 	local smartPart = Workspace:FindFirstChild("SmartPromptPart")
 	if smartPart then
@@ -187,13 +185,11 @@ local function stealCycle()
 		end
 	end
 
-	-- Yuva boşsa hemen sıradakine koş
 	if not stealPrompt then
 		setStatus(("Yuva %d boş, sıradakine koşuluyor..."):format(currentIdx))
 		return true
 	end
 
-	-- YUMURTA VAR! Çalma işlemini yap
 	setStatus(("Yuva %d DOLU! Alınıyor..."):format(currentIdx))
 	stealPrompt.RequiresLineOfSight = false
 	stealPrompt.MaxActivationDistance = 50
@@ -203,11 +199,9 @@ local function stealCycle()
 		task.wait(CONFIG.StealHoldTime)
 	end
 
-	-- Base'e koş
 	setStatus("Base'e dönülüyor...")
 	runTo(baseCFrame.Position + Vector3.new(0, 1.0, 0))
 
-	-- Base'de teslim beklemesi
 	setStatus("Base'de yumurta teslim ediliyor...")
 	task.wait(CONFIG.BaseWait)
 
@@ -237,15 +231,16 @@ local function setAutoSteal(on)
 	return true
 end
 
--- ==================== ⚡ TÜM OYUN KODLARINI DÖK ====================
+-- ==================== ⚡ TEK TIKLA TÜM OYUN KODLARINI ÇEK & LİNK YAP ====================
 local function dumpAllGameScripts()
-	setStatus("Tüm oyun kodları taranıyor ve decompile ediliyor, lütfen bekle...")
+	setStatus("Tüm kodlar toplanıyor ve internet linki oluşturuluyor, bekle...")
 	task.wait(0.1)
 
 	local output = {}
 	local header = string.rep("=", 80)
 	table.insert(output, header)
 	table.insert(output, ("-- AEROSTEAL TAM OYUN KODLARI DÖKÜMÜ"))
+	table.insert(output, ("-- PlaceId: %d | Zaman: %s"):format(game.PlaceId, os.date()))
 	table.insert(output, header .. "\n")
 
 	local roots = {
@@ -297,7 +292,7 @@ local function dumpAllGameScripts()
 
 	local fullText = table.concat(output, "\n")
 	
-	-- Dosyaya yaz
+	-- 1. Delta workspace'e yaz
 	if typeof(writefile) == "function" then
 		pcall(function()
 			if typeof(makefolder) == "function" and not isfolder("AeroSteal") then makefolder("AeroSteal") end
@@ -305,10 +300,37 @@ local function dumpAllGameScripts()
 		end)
 	end
 
-	-- Panoya kopyala
-	copyText(fullText)
-	setStatus(("Tamamlandı! %d script çıkarıldı. Panona kopyalandı!"):format(scriptCount))
-	log("Tüm kodlar panona kopyalandı! Masaüstünde bir metin belgesi açıp Ctrl+V yapabilirsin.")
+	-- 2. İnternete yükle ve KISA LİNK OLUŞTUR (Emülatör kopyalama hatasını önler!)
+	local req = request or http_request or (syn and syn.request) or (http and http.request)
+	local uploadedUrl = nil
+
+	if req then
+		setStatus("İnternet linki üretiliyor...")
+		local okPost, res = pcall(function()
+			return req({
+				Url = "https://dpaste.org/api/",
+				Method = "POST",
+				Headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+				Body = "content=" .. HttpService:UrlEncode(fullText) .. "&format=url"
+			})
+		end)
+		if okPost and res and res.Body then
+			uploadedUrl = string.match(res.Body, "https://dpaste%.org/[%w]+")
+		end
+	end
+
+	if uploadedUrl then
+		copyText(uploadedUrl)
+		if linkBox then linkBox.Text = uploadedUrl end
+		log("==================================================")
+		log("🎉 TÜM KODLARIN LİNKİ OLUŞTU: " .. uploadedUrl)
+		log("Bu link panona kopyalandı! Chat'e yapıştırabilirsin.")
+		log("==================================================")
+		setStatus("LİNK OLUŞTU VE KOPYALANDI! " .. uploadedUrl)
+	else
+		copyText(fullText)
+		setStatus(("Tamamlandı! %d script kopyalandı."):format(scriptCount))
+	end
 end
 
 -- ==================== GUI ====================
@@ -334,10 +356,9 @@ screen.ResetOnSpawn = false
 screen.DisplayOrder = 999
 screen.Parent = guiRoot
 
--- Dikdörtgen Panel (480x300)
 local mainFrame = Instance.new("Frame")
-mainFrame.Size = UDim2.fromOffset(480, 300)
-mainFrame.Position = UDim2.new(0.5, -240, 0.5, -150)
+mainFrame.Size = UDim2.fromOffset(480, 310)
+mainFrame.Position = UDim2.new(0.5, -240, 0.5, -155)
 mainFrame.BackgroundColor3 = CONFIG.DarkBg
 mainFrame.BorderSizePixel = 0
 mainFrame.Parent = screen
@@ -370,7 +391,7 @@ local titleText = Instance.new("TextLabel")
 titleText.Size = UDim2.new(1, -20, 1, 0)
 titleText.Position = UDim2.fromOffset(12, 0)
 titleText.BackgroundTransparency = 1
-titleText.Text = "AERO HUB  •  Steal An Egg v5.2 PRO"
+titleText.Text = "AERO HUB  •  Steal An Egg v5.3 PRO"
 titleText.TextXAlignment = Enum.TextXAlignment.Left
 titleText.Font = Enum.Font.GothamBold
 titleText.TextSize = 13
@@ -396,7 +417,6 @@ track(UserInputService.InputEnded:Connect(function(input)
 	end
 end))
 
--- Sol Kenar Menüsü
 local sidebar = Instance.new("Frame")
 sidebar.Size = UDim2.new(0, 130, 1, -36)
 sidebar.Position = UDim2.fromOffset(0, 36)
@@ -419,7 +439,7 @@ statusLabel.Size = UDim2.new(1, -140, 0, 24)
 statusLabel.Position = UDim2.new(0, 136, 1, -28)
 statusLabel.BackgroundColor3 = CONFIG.CardBg
 statusLabel.BorderSizePixel = 0
-statusLabel.Text = "Hazır! Base'de durup 1. butona bas."
+statusLabel.Text = "Hazır! Kod Dökücü sekmesinden butona bas."
 statusLabel.Font = Enum.Font.Gotham
 statusLabel.TextSize = 11
 statusLabel.TextColor3 = Color3.fromRGB(180, 180, 210)
@@ -482,8 +502,6 @@ local function makeBtn(container, text, callback)
 	return b
 end
 
--- ==================== SEKMELER ====================
-
 -- 1. SEKME: AUTO STEAL
 local tabSteal = addTab("Auto Steal", "🥚")
 
@@ -515,12 +533,24 @@ end)
 
 -- 2. SEKME: KOD DÖKÜCÜ
 local tabDump = addTab("Kod Dökücü", "⚡")
-makeBtn(tabDump, "⚡ TÜM OYUN KODLARINI DÖK VE KOPYALA", safe(dumpAllGameScripts))
+makeBtn(tabDump, "⚡ TÜM KODLARI ÇEK VE LİNK ÜRET", safe(dumpAllGameScripts))
+
+linkBox = Instance.new("TextBox")
+linkBox.Size = UDim2.new(1, 0, 0, 32)
+linkBox.BackgroundColor3 = Color3.fromRGB(12, 12, 16)
+linkBox.Text = "Üretilen link burada görünecek..."
+linkBox.Font = Enum.Font.Code
+linkBox.TextSize = 11
+linkBox.TextColor3 = Color3.fromRGB(140, 255, 140)
+linkBox.ClearTextOnFocus = false
+linkBox.Parent = tabDump
+corner(linkBox, 6)
+stroke(linkBox, ACCENT, 1)
 
 local dumpInfo = Instance.new("TextLabel")
-dumpInfo.Size = UDim2.new(1, 0, 0, 80)
+dumpInfo.Size = UDim2.new(1, 0, 0, 60)
 dumpInfo.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
-dumpInfo.Text = "Bu butona bastığında oyunun 80-100 adet kaynak kodunu tek seferde decompile eder ve panona kopyalar. Bilgisayarında masaüstüne boş bir metin belgesi açıp Ctrl+V ile yapıştırabilirsin!"
+dumpInfo.Text = "Butona basınca tüm kodlar decompile edilip bir internet linkine dönüştürülür. Kutudaki o linki kopyalayıp buraya yapıştırırsan doğrudan masaüstüne indiririm!"
 dumpInfo.TextColor3 = Color3.fromRGB(160, 160, 185)
 dumpInfo.Font = Enum.Font.Gotham
 dumpInfo.TextSize = 11
@@ -562,7 +592,7 @@ makeBtn(tabLog, "Logları Panoya Kopyala", function()
 	setStatus("Log panoya kopyalandı.")
 end)
 
-switchTab("Auto Steal")
+switchTab("Kod Dökücü")
 
 -- Kapatma
 local function unload()
@@ -581,4 +611,4 @@ track(UserInputService.InputBegan:Connect(function(input, processed)
 	end
 end))
 
-setStatus("Aero v5.2 Hazır! Base'de durup 1. butona bas.")
+setStatus("Aero v5.3 Hazır! Butona bas.")
