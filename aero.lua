@@ -1,4 +1,4 @@
--- AeroSteal v2.1 : Steal An Egg helper (Luau, executor ortamı)
+-- AeroSteal v2.2 : Steal An Egg helper (Luau, executor ortamı)
 -- RightShift veya ekrandaki "A" düğmesi: pencereyi gizle/göster
 
 local Players = game:GetService("Players")
@@ -23,8 +23,13 @@ local CONFIG = {
 	RequirePrompt = true,        -- tahmin: çalma ProximityPrompt ile
 	TeleportYOffset = 3,
 	TeleportSettle = 0.25,
+	TeleportVerifyDelay = 0.3,   -- ışınlanma sonrası kontrol gecikmesi (sn)
+	TeleportTolerance = 6,       -- hedefe bu kadar studs yakınsa başarılı say
 	StealTimeout = 3,
 	CycleCooldown = 1.5,
+	DefaultSpeed = 32,           -- kalibre edilmedi: Roblox varsayılanı 16
+	MinSpeed = 1,
+	MaxSpeed = 200,
 	PlayerColor = Color3.fromRGB(255, 70, 70),
 	EggColor = Color3.fromRGB(255, 220, 80),
 	Accent = Color3.fromRGB(120, 90, 255),
@@ -53,7 +58,10 @@ local function getGuiRoot()
 end
 local guiRoot = getGuiRoot()
 
-local state = { playerEsp = false, eggEsp = false, autoSteal = false, priority = {} }
+local state = {
+	playerEsp = false, eggEsp = false, autoSteal = false,
+	speedOn = false, speed = CONFIG.DefaultSpeed, priority = {},
+}
 local connections = {}
 local playerRecords = {}
 local eggRecords = {}
@@ -138,6 +146,71 @@ local function makeMarker(adornee, color)
 	label.Parent = gui
 	gui.Parent = guiRoot
 	return gui, label
+end
+
+-- ---------- ışınlanma (sonucu doğrular) ----------
+local function teleportTo(cf)
+	if not validPosition(cf.Position) then return false, "Geçersiz hedef konumu." end
+	local char, _, root = getCharacter()
+	if not char then return false, "Karakter yok veya ölü." end
+
+	local function distanceToTarget()
+		local c, _, r = getCharacter()
+		if not c then return nil end
+		return (r.Position - cf.Position).Magnitude
+	end
+
+	-- yöntem 1: PivotTo
+	char:PivotTo(cf)
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.AssemblyAngularVelocity = Vector3.zero
+	task.wait(CONFIG.TeleportVerifyDelay)
+	local d = distanceToTarget()
+	if d == nil then return false, "Karakter ışınlanma sırasında kayboldu." end
+	if d <= CONFIG.TeleportTolerance then return true, "ok" end
+
+	-- yöntem 2: doğrudan CFrame
+	local _, _, r2 = getCharacter()
+	if r2 then
+		r2.CFrame = cf
+		r2.AssemblyLinearVelocity = Vector3.zero
+		r2.AssemblyAngularVelocity = Vector3.zero
+	end
+	task.wait(CONFIG.TeleportVerifyDelay)
+	d = distanceToTarget()
+	if d == nil then return false, "Karakter ışınlanma sırasında kayboldu." end
+	if d <= CONFIG.TeleportTolerance then return true, "ok (2. yöntem)" end
+	return false, ("geri alındı veya engellendi, hedefe %d m uzakta"):format(math.floor(d))
+end
+
+-- ---------- hız ayarı ----------
+local speedHum, speedOriginal
+local function applySpeed()
+	local _, hum = getCharacter()
+	if not hum then return end
+	if hum ~= speedHum then
+		speedHum = hum
+		speedOriginal = hum.WalkSpeed
+	end
+	if hum.WalkSpeed ~= state.speed then hum.WalkSpeed = state.speed end
+end
+
+local function restoreSpeed()
+	if speedHum and speedHum.Parent and speedOriginal then
+		speedHum.WalkSpeed = speedOriginal
+	end
+	speedHum, speedOriginal = nil, nil
+end
+
+local function setSpeedOn(on)
+	state.speedOn = on
+	if on then
+		applySpeed()
+		setStatus(("Hız ayarı açık: %g"):format(state.speed))
+	else
+		restoreSpeed()
+		setStatus("Hız ayarı kapalı, eski hıza dönüldü.")
+	end
 end
 
 -- ---------- oyuncu ESP ----------
@@ -228,6 +301,7 @@ end
 local function dump()
 	print("========== AeroSteal DISCOVERY ==========")
 	print(("PlaceId=%d GameId=%d"):format(game.PlaceId, game.GameId))
+
 	local lines, scanned = 0, 0
 	print("-- Workspace adayları (egg/nest) --")
 	for _, inst in ipairs(Workspace:GetDescendants()) do
@@ -238,6 +312,19 @@ local function dump()
 			lines += 1
 		end
 	end
+
+	print("-- ProximityPrompt'lar --")
+	lines, scanned = 0, 0
+	for _, inst in ipairs(Workspace:GetDescendants()) do
+		scanned += 1
+		if scanned > CONFIG.MaxScan or lines >= CONFIG.MaxDumpLines then break end
+		if inst:IsA("ProximityPrompt") then
+			print(("[Prompt] %s | Action=%q Object=%q Enabled=%s"):format(
+				inst:GetFullName(), inst.ActionText, inst.ObjectText, tostring(inst.Enabled)))
+			lines += 1
+		end
+	end
+
 	print("-- ReplicatedStorage remote'ları --")
 	lines = 0
 	for _, inst in ipairs(ReplicatedStorage:GetDescendants()) do
@@ -254,6 +341,7 @@ end
 -- ---------- otomatik çalma ----------
 local function pickTarget(myPos)
 	local best, bestRank, bestDist
+	local stats = { matched = 0, withPrompt = 0 }
 	local scanned = 0
 	for _, inst in ipairs(Workspace:GetDescendants()) do
 		scanned += 1
@@ -261,7 +349,9 @@ local function pickTarget(myPos)
 		if (inst:IsA("Model") or inst:IsA("BasePart"))
 			and (nameMatches(inst.Name, CONFIG.EggKeywords) or nameMatches(inst.Name, CONFIG.NestKeywords))
 			and not insideAnyCharacter(inst) then
+			stats.matched += 1
 			local prompt = findPrompt(inst)
+			if prompt then stats.withPrompt += 1 end
 			local adornee = adorneeFor(inst)
 			if adornee and validPosition(adornee.Position)
 				and (prompt ~= nil or not CONFIG.RequirePrompt)
@@ -279,14 +369,18 @@ local function pickTarget(myPos)
 			end
 		end
 	end
-	return best
+	return best, stats
+end
+
+local function noTargetMessage(stats)
+	return ("Uygun egg yok (isim eşleşen: %d, prompt'lu: %d). Keşif dökümüne bak."):format(stats.matched, stats.withPrompt)
 end
 
 local function previewTarget()
 	local _, _, root = getCharacter()
 	if not root then setStatus("Karakter yok veya ölü."); return end
-	local t = pickTarget(root.Position)
-	if not t then setStatus("Uygun hedef bulunamadı."); return end
+	local t, stats = pickTarget(root.Position)
+	if not t then setStatus(noTargetMessage(stats)); return end
 	local rankText = (t.rank == math.huge) and "listede yok" or ("öncelik " .. t.rank)
 	setStatus(("Hedef: %s | %s | %dm"):format(t.inst.Name, rankText, math.floor(t.dist)))
 end
@@ -294,18 +388,21 @@ end
 local function stealCycle()
 	local char, _, root = getCharacter()
 	if not char then return false, "Karakter yok veya ölü." end
-	local target = pickTarget(root.Position)
-	if not target then return false, "Uygun egg bulunamadı." end
+	local target, stats = pickTarget(root.Position)
+	if not target then return false, noTargetMessage(stats) end
 	if not target.prompt then return false, "Hedefte ProximityPrompt yok." end
 
-	char:PivotTo(CFrame.new(target.adornee.Position + Vector3.new(0, CONFIG.TeleportYOffset, 0)))
+	local okTp, whyTp = teleportTo(CFrame.new(target.adornee.Position + Vector3.new(0, CONFIG.TeleportYOffset, 0)))
+	if not okTp then return false, "Egg'e ışınlanma başarısız: " .. whyTp end
 	task.wait(CONFIG.TeleportSettle)
 	if not target.inst:IsDescendantOf(Workspace) or not target.prompt.Parent then
 		return false, "Hedef kayboldu."
 	end
 
+	local char1 = getCharacter()
+	if not char1 then return false, "Karakter öldü." end
 	local confirmed = false
-	local c1 = char.ChildAdded:Connect(function(ch) if ch:IsA("Tool") then confirmed = true end end)
+	local c1 = char1.ChildAdded:Connect(function(ch) if ch:IsA("Tool") then confirmed = true end end)
 	local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
 	local c2 = backpack and backpack.ChildAdded:Connect(function(ch) if ch:IsA("Tool") then confirmed = true end end)
 
@@ -318,9 +415,10 @@ local function stealCycle()
 	c1:Disconnect()
 	if c2 then c2:Disconnect() end
 
-	local char2 = getCharacter()
-	if char2 and baseCFrame then char2:PivotTo(baseCFrame) end
-	return true, ("%s: %s"):format(target.inst.Name, confirmed and "alındı sinyali var, base'e dönüldü" or "ateşlendi, doğrulanamadı, base'e dönüldü")
+	local okBack, whyBack = teleportTo(baseCFrame)
+	local stealText = confirmed and "alındı sinyali var" or "ateşlendi, doğrulanamadı"
+	local backText = okBack and "base'e dönüldü" or ("base'e dönülemedi: " .. whyBack)
+	return true, ("%s: %s, %s"):format(target.inst.Name, stealText, backText)
 end
 
 local function setAutoSteal(on)
@@ -357,6 +455,7 @@ end
 -- ---------- güncelleme döngüsü ----------
 local acc = 0
 track(RunService.Heartbeat:Connect(function(dt)
+	if state.speedOn then applySpeed() end
 	acc += dt
 	if acc < CONFIG.UpdateInterval then return end
 	acc = 0
@@ -380,6 +479,8 @@ end))
 local function unload()
 	autoToken += 1
 	state.autoSteal = false
+	state.speedOn = false
+	restoreSpeed()
 	setEggEsp(false)
 	setPlayerEsp(false)
 	for _, c in ipairs(connections) do c:Disconnect() end
@@ -598,13 +699,30 @@ addHeader("GÖRÜNÜM")
 addToggle("Oyuncu ESP", function(on) setPlayerEsp(on) end)
 addToggle("Egg / Nest ESP", function(on) setEggEsp(on) end)
 
-addHeader("OTOMATİK ÇALMA")
+addHeader("HAREKET")
 addButton("Base konumunu kaydet (base'de dur)", function()
 	local _, _, root = getCharacter()
 	if not root then setStatus("Karakter yok veya ölü."); return end
 	baseCFrame = root.CFrame
 	setStatus("Base konumu kaydedildi.")
 end)
+addButton("Base'e ışınlan", function()
+	if baseCFrame == nil then setStatus("Önce base konumunu kaydet."); return end
+	task.spawn(function()
+		local ok, why = teleportTo(baseCFrame)
+		setStatus(ok and "Base'e ışınlandın." or ("Base'e ışınlanma başarısız: " .. why))
+	end)
+end)
+addTextBox(("Hız değeri (%d-%d)"):format(CONFIG.MinSpeed, CONFIG.MaxSpeed), function(text)
+	local n = tonumber(text)
+	if not n or not isFinite(n) then setStatus("Geçersiz hız değeri."); return end
+	state.speed = math.clamp(n, CONFIG.MinSpeed, CONFIG.MaxSpeed)
+	setStatus(("Hız hedefi: %g"):format(state.speed))
+	if state.speedOn then applySpeed() end
+end)
+addToggle("Hız ayarı", function(on) setSpeedOn(on) end)
+
+addHeader("OTOMATİK ÇALMA")
 addTextBox("Öncelik: en iyiden en kötüye, virgülle", function(text)
 	state.priority = parsePriority(text)
 	setStatus(("Öncelik listesi: %d kayıt."):format(#state.priority))
