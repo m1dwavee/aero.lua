@@ -1287,6 +1287,105 @@ addButton("Dünya A al (egg YOKKEN)", safe(worldA))
 addButton("Dünya B + fark (egg ELİNDEYKEN)", safe(worldB))
 -- ===== v2.4 ek araçlar sonu =====
 
+-- ===== v2.5 ek araçlar: Egg Tipleri & Çalma Mekaniği =====
+local function dumpAllEggTypes()
+	local startIdx = #logLines + 1
+	log("== TÜM EGG TİPLERİ VE MODÜLLER ==")
+	local found = 0
+	for _, inst in ipairs(ReplicatedStorage:GetDescendants()) do
+		if inst:IsA("ModuleScript") then
+			-- Cmdr komutlarını atla, asıl tip ve data modüllerine odaklan
+			if not string.find(inst:GetFullName(), "CmdrClient.Commands.") then
+				local ok, data = pcall(require, inst)
+				if ok and type(data) == "table" then
+					local okEnc, str = pcall(function() return HttpService:JSONEncode(data) end)
+					if okEnc then
+						local lowerStr = string.lower(str)
+						if string.find(lowerStr, "egg") or string.find(lowerStr, "parasite") or string.find(lowerStr, "rarity") then
+							found += 1
+							log(("[Modül] %s"):format(inst:GetFullName()))
+							for k, v in pairs(data) do
+								if type(v) == "table" then
+									local okSub, subStr = pcall(function() return HttpService:JSONEncode(v) end)
+									log(("  %s = %s"):format(tostring(k), okSub and string.sub(subStr, 1, 150) or "tablo"))
+								else
+									log(("  %s = %s"):format(tostring(k), tostring(v)))
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+	log(("Toplam bulunan modül: %d"):format(found))
+	log("== TARAMA BİTTİ ==")
+	local copied = copyText(table.concat(logLines, "\n", startIdx, #logLines))
+	setStatus(copied and "Egg tipleri panoya kopyalandı." or "Egg tipleri log'a yazıldı.")
+end
+
+local function inspectActiveEgg()
+	local startIdx = #logLines + 1
+	log("== EGGPOINT & ÇALMA MEKANİĞİ İNCELEME ==")
+	local _, _, root = getCharacter()
+	local myPos = root and root.Position
+
+	local nearestPoint, nearestDist
+	for _, inst in ipairs(Workspace:GetDescendants()) do
+		if inst.Name == "EggPoint" and inst:IsA("BasePart") then
+			local d = myPos and (inst.Position - myPos).Magnitude or math.huge
+			if not nearestDist or d < nearestDist then
+				nearestPoint = inst
+				nearestDist = d
+			end
+		end
+	end
+
+	if not nearestPoint then
+		log("Workspace'te hiç EggPoint bulunamadı.")
+	else
+		log(("En yakın EggPoint: %s (Mesafe: %.1fm)"):format(nearestPoint:GetFullName(), nearestDist or 0))
+		log("EggPoint Bağlantıları:")
+		for _, child in ipairs(nearestPoint:GetChildren()) do
+			log(("  [%s] %s"):format(child.ClassName, child.Name))
+			if child:IsA("WeldConstraint") or child:IsA("Weld") then
+				log(("    Part0: %s | Part1: %s"):format(
+					child.Part0 and child.Part0:GetFullName() or "nil",
+					child.Part1 and child.Part1:GetFullName() or "nil"
+				))
+			elseif child:IsA("ProximityPrompt") then
+				log(("    Prompt bulundu: Action=%q, Object=%q, Hold=%.1f, Enabled=%s"):format(
+					child.ActionText, child.ObjectText, child.HoldDuration, tostring(child.Enabled)
+				))
+			end
+		end
+
+		local parentAuthored = nearestPoint.Parent
+		if parentAuthored then
+			log("Egg Bölgesi (" .. parentAuthored.Name .. ") İçeriği:")
+			for _, child in ipairs(parentAuthored:GetChildren()) do
+				log(("  [%s] %s"):format(child.ClassName, child.Name))
+				for _, prompt in ipairs(child:GetDescendants()) do
+					if prompt:IsA("ProximityPrompt") then
+						log(("    -> Prompt: %s (Action=%q, Object=%q)"):format(
+							prompt:GetFullName(), prompt.ActionText, prompt.ObjectText
+						))
+					elseif prompt:IsA("ClickDetector") then
+						log(("    -> ClickDetector: %s"):format(prompt:GetFullName()))
+					end
+				end
+			end
+		end
+	end
+	log("== İNCELEME BİTTİ ==")
+	local copied = copyText(table.concat(logLines, "\n", startIdx, #logLines))
+	setStatus(copied and "EggPoint incelemesi panoya kopyalandı." or "EggPoint incelemesi log'a yazıldı.")
+end
+
+addButton("Tüm Egg Tiplerini Dök", safe(dumpAllEggTypes))
+addButton("EggPoint & Çalma İncele", safe(inspectActiveEgg))
+-- ===== v2.5 ek araçlar sonu =====
+
 addHeader("LOG")
 local logFrame = Instance.new("Frame")
 logFrame.Size = UDim2.new(1, 0, 0, 220)
