@@ -1,4 +1,4 @@
--- AeroSteal v3.3 : Steal An Egg (Rotasyonlu & Bölge Seçimli Auto Steal)
+-- AeroSteal v3.4 : Steal An Egg (Hızlı Koşu & Süzülme Motoru - Işınlanmasız)
 -- Menü: RightShift veya ekrandaki mor "A" düğmesi
 
 local Players = game:GetService("Players")
@@ -13,14 +13,12 @@ local fpp = fireproximityprompt
 
 -- ===== AYARLAR =====
 local CONFIG = {
-	TeleportYOffset = 2.5,
-	TeleportVerifyDelay = 0.25,
-	TeleportTolerance = 6,
+	RunHeight = 4.0,           -- Tuzaklara ve muhafızlara çarpmamak için yerden yükseklik (stud)
 	StealHoldTime = 1.25,       -- Prompt basılı tutma süresi
-	BaseDepositWait = 0.8,      -- Base'de yumurtanın teslim edilme beklemesi
+	BaseDepositWait = 1.0,      -- Base'de yumurtanın teslim edilme beklemesi
 	CycleCooldown = 0.5,        -- Döngüler arası bekleme
-	DefaultSpeed = 32,
-	MinSpeed = 1,
+	DefaultSpeed = 75,          -- Koşma / Süzülme hızı (Hızlı ve güvenli)
+	MinSpeed = 16,
 	MaxSpeed = 200,
 	PlayerColor = Color3.fromRGB(255, 70, 70),
 	EggColor = Color3.fromRGB(255, 220, 80),
@@ -55,6 +53,7 @@ local autoToken = 0
 local screen, statusLabel, logLabel, logScroll, areaBtn
 local logLines = {}
 local nestIndex = 1
+local currentTween = nil
 
 local function track(conn) connections[#connections + 1] = conn; return conn end
 
@@ -97,7 +96,7 @@ local function copyText(text)
 	return (pcall(fn, text))
 end
 
--- ---------- Yardımcılar ----------
+-- ---------- Karakter & Noclip ----------
 local function isFinite(v) return v == v and v ~= math.huge and v ~= -math.huge end
 local function validPosition(p) return isFinite(p.X) and isFinite(p.Y) and isFinite(p.Z) end
 
@@ -111,6 +110,63 @@ local function getCharacter()
 	return nil
 end
 
+local function noclipChar()
+	local char = LocalPlayer.Character
+	if char then
+		for _, part in ipairs(char:GetDescendants()) do
+			if part:IsA("BasePart") and part.CanCollide then
+				part.CanCollide = false
+			end
+		end
+	end
+end
+
+-- ---------- YÜKSEK HIZLI SÜZÜLME / KOŞMA (IŞINLANMASIZ) ----------
+local function glideTo(targetCF)
+	local char, hum, root = getCharacter()
+	if not char then return false, "Karakter yok." end
+
+	local dist = (root.Position - targetCF.Position).Magnitude
+	local speed = math.clamp(state.speed, 20, 200)
+	local duration = math.clamp(dist / speed, 0.1, 15)
+
+	-- Karakteri hedefe doğru çevir
+	local lookTarget = CFrame.lookAt(targetCF.Position, targetCF.Position + root.CFrame.LookVector)
+
+	local tweenInfo = TweenInfo.new(duration, Enum.EasingStyle.Linear)
+	currentTween = TweenService:Create(root, tweenInfo, { CFrame = targetCF })
+
+	local completed = false
+	local c1 = currentTween.Completed:Connect(function() completed = true end)
+
+	currentTween:Play()
+
+	-- Yol boyunca noclip yap ve ölmeyi denetle
+	while not completed do
+		if not state.autoSteal then
+			currentTween:Cancel()
+			break
+		end
+		local c, h, r = getCharacter()
+		if not c or h.Health <= 0 then
+			currentTween:Cancel()
+			break
+		end
+		noclipChar()
+		r.AssemblyLinearVelocity = Vector3.zero
+		task.wait(0.05)
+	end
+
+	c1:Disconnect()
+	currentTween = nil
+
+	local c2, h2, r2 = getCharacter()
+	if not c2 or h2.Health <= 0 then return false, "Karakter hareket sırasında öldü." end
+
+	return true, "Hedefe ulaşıldı."
+end
+
+-- ---------- ESP ----------
 local function makeMarker(adornee, color)
 	local gui = Instance.new("BillboardGui")
 	gui.Name = "AeroMarker"
@@ -131,60 +187,6 @@ local function makeMarker(adornee, color)
 	return gui, label
 end
 
--- ---------- Işınlanma ----------
-local function teleportTo(cf)
-	if not validPosition(cf.Position) then return false, "Geçersiz hedef." end
-	local char, _, root = getCharacter()
-	if not char then return false, "Karakter yok." end
-
-	char:PivotTo(cf)
-	root.AssemblyLinearVelocity = Vector3.zero
-	root.AssemblyAngularVelocity = Vector3.zero
-	task.wait(CONFIG.TeleportVerifyDelay)
-
-	local d = (root.Position - cf.Position).Magnitude
-	if d <= CONFIG.TeleportTolerance then return true, "ok" end
-
-	root.CFrame = cf
-	root.AssemblyLinearVelocity = Vector3.zero
-	task.wait(CONFIG.TeleportVerifyDelay)
-	d = (root.Position - cf.Position).Magnitude
-	if d <= CONFIG.TeleportTolerance then return true, "ok" end
-
-	return false, ("Uzakta kalındı: %dm"):format(math.floor(d))
-end
-
--- ---------- Hız Ayarı ----------
-local speedHum, speedOriginal
-local function applySpeed()
-	local _, hum = getCharacter()
-	if not hum then return end
-	if hum ~= speedHum then
-		speedHum = hum
-		speedOriginal = hum.WalkSpeed
-	end
-	if hum.WalkSpeed ~= state.speed then hum.WalkSpeed = state.speed end
-end
-
-local function restoreSpeed()
-	if speedHum and speedHum.Parent and speedOriginal then
-		speedHum.WalkSpeed = speedOriginal
-	end
-	speedHum, speedOriginal = nil, nil
-end
-
-local function setSpeedOn(on)
-	state.speedOn = on
-	if on then
-		applySpeed()
-		setStatus(("Hız açık: %g"):format(state.speed))
-	else
-		restoreSpeed()
-		setStatus("Hız kapalı.")
-	end
-end
-
--- ---------- ESP ----------
 local function clearPlayer(plr)
 	local rec = playerRecords[plr]
 	if not rec then return end
@@ -264,7 +266,6 @@ local function getAvailableAreas()
 	return areas
 end
 
--- ---------- YUVALARI TARA (ROTASYONLU) ----------
 local function getAllNests()
 	local nests = {}
 	local guardAreas = Workspace:FindFirstChild("World")
@@ -286,9 +287,9 @@ local function getAllNests()
 	return nests
 end
 
--- ---------- AKILLI ÇALMA DÖNGÜSÜ ----------
+-- ---------- ÇALMA DÖNGÜSÜ (KOŞARAK / SÜZÜLEREK) ----------
 local function stealCycle()
-	local char, _, root = getCharacter()
+	local char, hum, root = getCharacter()
 	if not char then return false, "Karakter hazır değil." end
 
 	local nests = getAllNests()
@@ -296,22 +297,21 @@ local function stealCycle()
 		return false, ("'%s' bölgesinde yuva bulunamadı."):format(state.selectedArea)
 	end
 
-	-- Sıradaki yuvayı seç (Asla aynı yuvada takılı kalmaz!)
 	if nestIndex > #nests then nestIndex = 1 end
 	local currentTarget = nests[nestIndex]
 	local targetNumber = nestIndex
-	nestIndex = (nestIndex % #nests) + 1 -- Bir sonraki sefere diğer yuvaya geç
+	nestIndex = (nestIndex % #nests) + 1
 
-	local targetCF = CFrame.new(currentTarget.pos + Vector3.new(0, CONFIG.TeleportYOffset, 0))
+	-- Yuvaya hafif yukarıdan süzülerek git (Tuzaklara takılmamak için +CONFIG.RunHeight)
+	local targetCF = CFrame.new(currentTarget.pos + Vector3.new(0, CONFIG.RunHeight, 0))
 
-	-- 1. Yuvaya ışınlan
-	local okTp, whyTp = teleportTo(targetCF)
-	if not okTp then return false, "Yuvaya ışınlanılamadı: " .. whyTp end
+	setStatus(("Yuva %d/%d doğru hızlı koşuluyor..."):format(targetNumber, #nests))
+	local okRun, whyRun = glideTo(targetCF)
+	if not okRun then return false, "Yuvaya ulaşılamadı: " .. whyRun end
 
-	-- 2. Prompt'un çıkması için kısa bekleme (0.2s)
 	task.wait(0.2)
 
-	-- 3. CarryAreaEgg / Steal prompt'unu kontrol et
+	-- Prompt'u bul
 	local stealPrompt = nil
 	local smartPart = Workspace:FindFirstChild("SmartPromptPart")
 	if smartPart then
@@ -326,27 +326,26 @@ local function stealCycle()
 		for _, p in ipairs(Workspace:GetDescendants()) do
 			if p:IsA("ProximityPrompt") and (p.Name == "CarryAreaEgg" or p.ActionText == "Steal") and p.Enabled then
 				local dist = (root.Position - p.Parent.Position).Magnitude
-				if dist <= 15 then
+				if dist <= 20 then
 					stealPrompt = p; break
 				end
 			end
 		end
 	end
 
-	-- 4. Eğer bu yuvada yumurta YOKSA (Prompt gelmediyse) hiç bekleme, direkt sıradakine geç!
+	-- Yuva boşsa hemen sıradakine koş
 	if not stealPrompt then
-		setStatus(("Yuva %d/%d boş çıktı, sıradakine geçiliyor..."):format(targetNumber, #nests))
+		setStatus(("Yuva %d boş, sıradakine koşuluyor..."):format(targetNumber))
 		return true, "Boş yuva atlandı."
 	end
 
-	-- 5. Yumurta VAR! Çalmayı başlat
-	setStatus(("Yuva %d/%d DOLU! Yumurta çalınıyor..."):format(targetNumber, #nests))
+	-- Yumurta var! Çal
+	setStatus(("Yuva %d DOLU! Yumurta çalınıyor..."):format(targetNumber))
 	if typeof(fpp) == "function" then
 		fpp(stealPrompt)
 		task.wait(CONFIG.StealHoldTime)
 	end
 
-	-- Destek: Remote'u da tetikle
 	pcall(function()
 		local net = ReplicatedStorage:FindFirstChild("Packages") and ReplicatedStorage.Packages:FindFirstChild("Networking")
 		local rf = net and net:FindFirstChild("RF/EggWorld/AskFieldEggCarry")
@@ -354,11 +353,18 @@ local function stealCycle()
 	end)
 	task.wait(0.2)
 
-	-- 6. Base'e dön
-	local okBack, whyBack = teleportTo(baseCFrame)
+	-- Karakter hayatta mı kontrol et
+	local c2, h2 = getCharacter()
+	if not c2 or h2.Health <= 0 then
+		return false, "Çalma anında öldü, yeniden doğuluyor..."
+	end
+
+	-- Base'e doğru yüksek hızla geri koş/süzül
+	setStatus("Base'e doğru hızlı koşuluyor...")
+	local okBack, whyBack = glideTo(baseCFrame + Vector3.new(0, 1.5, 0))
 	if not okBack then return false, "Base'e dönülemedi: " .. whyBack end
 
-	-- 7. Base'e teslim et
+	-- Base'de yumurtayı teslim et
 	setStatus("Base'de yumurta teslim ediliyor...")
 	pcall(function()
 		local net = ReplicatedStorage:FindFirstChild("Packages") and ReplicatedStorage.Packages:FindFirstChild("Networking")
@@ -367,7 +373,7 @@ local function stealCycle()
 	end)
 	task.wait(CONFIG.BaseDepositWait)
 
-	return true, ("Yumurta başarıyla çalındı ve base'e bırakıldı! (Yuva %d)"):format(targetNumber)
+	return true, ("Yumurta başarıyla çalındı ve base'e getirildi! (Yuva %d)"):format(targetNumber)
 end
 
 local function setAutoSteal(on)
@@ -375,7 +381,8 @@ local function setAutoSteal(on)
 	local token = autoToken
 	if not on then
 		state.autoSteal = false
-		setStatus("Auto Steal kapatıldı.")
+		if currentTween then currentTween:Cancel() end
+		setStatus("Auto Steal durduruldu.")
 		return false
 	end
 	if baseCFrame == nil then
@@ -449,7 +456,7 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, 0, 0, 42)
 title.BackgroundColor3 = Color3.fromRGB(26, 26, 38)
 title.BorderSizePixel = 0
-title.Text = "  AERO  •  Steal An Egg v3.3"
+title.Text = "  AERO  •  Steal An Egg v3.4 GLIDE"
 title.TextXAlignment = Enum.TextXAlignment.Left
 title.Font = Enum.Font.GothamBold
 title.TextSize = 15
@@ -573,6 +580,24 @@ local function addButton(text, callback)
 	return b
 end
 
+local function addTextBox(placeholder, onCommit)
+	local tb = Instance.new("TextBox")
+	tb.Size = UDim2.new(1, 0, 0, 34)
+	tb.BackgroundColor3 = Color3.fromRGB(30, 30, 42)
+	tb.PlaceholderText = placeholder
+	tb.PlaceholderColor3 = Color3.fromRGB(120, 120, 145)
+	tb.Text = ""
+	tb.ClearTextOnFocus = false
+	tb.Font = Enum.Font.Gotham
+	tb.TextSize = 13
+	tb.TextColor3 = Color3.fromRGB(235, 235, 245)
+	tb.TextXAlignment = Enum.TextXAlignment.Left
+	tb.Parent = content
+	corner(tb, 8)
+	local p = Instance.new("UIPadding"); p.PaddingLeft = UDim.new(0, 10); p.Parent = tb
+	tb.FocusLost:Connect(function() onCommit(tb.Text) end)
+end
+
 -- Butonlar
 addHeader("BÖLGE SEÇİMİ")
 local availableAreas = getAvailableAreas()
@@ -586,28 +611,33 @@ areaBtn = addButton("Hedef Bölge: " .. state.selectedArea, function()
 	setStatus("Seçilen bölge: " .. state.selectedArea)
 end)
 
-addHeader("AUTO STEAL")
+addHeader("AUTO STEAL (HIZLI KOŞU & SÜZÜLME)")
 addButton("1. Base Konumunu Kaydet (Base'de Dur)", function()
 	local _, _, root = getCharacter()
 	if not root then setStatus("Karakter yok."); return end
 	baseCFrame = root.CFrame
 	setStatus("Base kaydedildi! Şimdi Auto Steal'i açabilirsin.")
 end)
-addButton("Base'e Işınlan", safe(function()
+addButton("Base'e Koş/Süzül", safe(function()
 	if baseCFrame == nil then setStatus("Önce base konumunu kaydet."); return end
-	local ok, why = teleportTo(baseCFrame)
-	setStatus(ok and "Base'e ışınlandın." or ("Hata: " .. why))
+	glideTo(baseCFrame)
 end))
-addToggle("AUTO STEAL (Akıllı Yuva Rotasyonu)", function(on) return setAutoSteal(on) end)
+addTextBox(("Koşu Hızı (Şu an: %d)"):format(state.speed), function(text)
+	local n = tonumber(text)
+	if n then
+		state.speed = math.clamp(n, CONFIG.MinSpeed, CONFIG.MaxSpeed)
+		setStatus(("Koşu hızı ayarlandı: %d"):format(state.speed))
+	end
+end)
+addToggle("AUTO STEAL (Ölmeden Hızlı Koş & Çal)", function(on) return setAutoSteal(on) end)
 
-addHeader("GÖRÜNÜM & HIZ")
+addHeader("GÖRÜNÜM")
 addToggle("Oyuncu ESP", function(on) setPlayerEsp(on) end)
 addToggle("Yuva ESP", function(on) setEggEsp(on) end)
-addToggle("Hız Ayarı (32)", function(on) setSpeedOn(on) end)
 
 addHeader("LOG")
 local logFrame = Instance.new("Frame")
-logFrame.Size = UDim2.new(1, 0, 0, 140)
+logFrame.Size = UDim2.new(1, 0, 0, 130)
 logFrame.BackgroundColor3 = Color3.fromRGB(12, 12, 18)
 logFrame.Parent = content
 corner(logFrame, 8)
@@ -639,8 +669,7 @@ end)
 local function unload()
 	autoToken += 1
 	state.autoSteal = false
-	state.speedOn = false
-	restoreSpeed()
+	if currentTween then currentTween:Cancel() end
 	setEggEsp(false)
 	setPlayerEsp(false)
 	for _, c in ipairs(connections) do c:Disconnect() end
@@ -652,10 +681,6 @@ end
 env.__AeroSteal = unload
 
 addButton("Kapat (Unload)", unload)
-
-track(RunService.Heartbeat:Connect(function()
-	if state.speedOn then applySpeed() end
-end))
 
 track(UserInputService.InputBegan:Connect(function(input, processed)
 	if processed then return end
