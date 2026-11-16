@@ -1,5 +1,5 @@
--- AeroSteal v3.0 : Steal An Egg (Nihai & Optimize Edilmiş Sürüm)
--- Menüyü gizle/göster: RightShift veya ekrandaki mor "A" düğmesi
+-- AeroSteal v3.1 : Steal An Egg (Kıdemli Sürüm - Akıllı Döngü & Bölge Seçimli)
+-- Menü: RightShift veya ekrandaki mor "A" düğmesi
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -9,17 +9,17 @@ local Workspace = game:GetService("Workspace")
 local TweenService = game:GetService("TweenService")
 
 local LocalPlayer = Players.LocalPlayer
-local fpp = fireproximityprompt -- Executor prompt fonksiyonu
+local fpp = fireproximityprompt
 
 -- ===== AYARLAR =====
 local CONFIG = {
 	MaxScan = 50000,
 	TeleportYOffset = 2.5,
-	TeleportSettle = 0.2,
 	TeleportVerifyDelay = 0.25,
 	TeleportTolerance = 6,
-	StealHoldTime = 1.3,        -- CarryAreaEgg 1.2s basılı tutma süresi + pay
-	CycleCooldown = 1.2,        -- Çalmalar arası bekleme
+	NestCooldown = 45,          -- Bir yuvadan çalındıktan sonra oraya tekrar gitmeme süresi (sn)
+	BaseDepositWait = 1.0,      -- Base'e yumurtayı teslim etme beklemesi
+	CycleCooldown = 0.8,
 	DefaultSpeed = 32,
 	MinSpeed = 1,
 	MaxSpeed = 200,
@@ -29,7 +29,6 @@ local CONFIG = {
 }
 -- ====================
 
--- Önceki kopyayı güvenle kapat
 local env = (getgenv and getgenv()) or _G
 local previous = env.__AeroSteal
 if type(previous) == "function" then pcall(previous) end
@@ -46,15 +45,17 @@ local guiRoot = getGuiRoot()
 
 local state = {
 	playerEsp = false, eggEsp = false, autoSteal = false,
-	speedOn = false, speed = CONFIG.DefaultSpeed, priority = {},
+	speedOn = false, speed = CONFIG.DefaultSpeed,
+	selectedArea = "Tümü", -- "Tümü", "Forest", vb.
 }
 local connections = {}
 local playerRecords = {}
 local eggRecords = {}
 local baseCFrame = nil
 local autoToken = 0
-local screen, statusLabel, logLabel, logScroll
+local screen, statusLabel, logLabel, logScroll, areaBtn
 local logLines = {}
+local blacklistedNests = {} -- Boş/çalınmış yuvaları takip eder
 
 local function track(conn) connections[#connections + 1] = conn; return conn end
 
@@ -97,7 +98,7 @@ local function copyText(text)
 	return (pcall(fn, text))
 end
 
--- ---------- Karakter & Yardımcılar ----------
+-- ---------- Yardımcılar ----------
 local function isFinite(v) return v == v and v ~= math.huge and v ~= -math.huge end
 local function validPosition(p) return isFinite(p.X) and isFinite(p.Y) and isFinite(p.Z) end
 
@@ -131,9 +132,9 @@ local function makeMarker(adornee, color)
 	return gui, label
 end
 
--- ---------- Işınlanma (Doğrulamalı) ----------
+-- ---------- Işınlanma ----------
 local function teleportTo(cf)
-	if not validPosition(cf.Position) then return false, "Geçersiz hedef konumu." end
+	if not validPosition(cf.Position) then return false, "Geçersiz hedef." end
 	local char, _, root = getCharacter()
 	if not char then return false, "Karakter yok." end
 
@@ -184,7 +185,7 @@ local function setSpeedOn(on)
 	end
 end
 
--- ---------- ESP Sistemleri ----------
+-- ---------- ESP ----------
 local function clearPlayer(plr)
 	local rec = playerRecords[plr]
 	if not rec then return end
@@ -241,40 +242,75 @@ end
 local function setEggEsp(on)
 	state.eggEsp = on
 	if on then
-		for _, inst in ipairs(Workspace:GetDescendants()) do
-			considerEgg(inst)
-		end
+		for _, inst in ipairs(Workspace:GetDescendants()) do considerEgg(inst) end
 	else
 		for inst in pairs(eggRecords) do clearEgg(inst) end
 	end
 end
 
--- ---------- OYUNUN GERÇEK YAPISINA GÖRE AUTO STEAL MOTORU ----------
-local function findStealTargets(myPos)
-	local list = {}
-	local scanned = 0
-	for _, inst in ipairs(Workspace:GetDescendants()) do
-		scanned += 1
-		if scanned > CONFIG.MaxScan then break end
+-- ---------- MEVCUT BÖLGELERİ BUL ----------
+local function getAvailableAreas()
+	local areas = { "Tümü" }
+	local guardAreas = Workspace:FindFirstChild("World")
+		and Workspace.World:FindFirstChild("Areas")
+		and Workspace.World.Areas:FindFirstChild("GuardAreas")
 
-		if inst.Name == "EggSpotBottom" or inst.Name == "EggFitBounds" or string.find(inst.Name, "Slot_") then
-			local pos = inst:IsA("BasePart") and inst.Position or (inst:IsA("Model") and inst:GetPivot().Position)
-			if pos and validPosition(pos) then
-				local d = (pos - myPos).Magnitude
-				list[#list + 1] = { inst = inst, pos = pos, dist = d }
+	if guardAreas then
+		for _, child in ipairs(guardAreas:GetChildren()) do
+			if child:IsA("Folder") or child:IsA("Model") then
+				areas[#areas + 1] = child.Name
 			end
 		end
 	end
+	return areas
+end
+
+-- ---------- GELİŞMİŞ HEDEF BULUCU (KARA LİSTE & BÖLGE FİLTRELİ) ----------
+local function findStealTargets(myPos)
+	local list = {}
+	local now = os.time()
+
+	-- Süresi dolan kara listeleri temizle
+	for inst, expire in pairs(blacklistedNests) do
+		if now >= expire then blacklistedNests[inst] = nil end
+	end
+
+	for _, inst in ipairs(Workspace:GetDescendants()) do
+		if inst.Name == "EggSpotBottom" or inst.Name == "EggFitBounds" or string.find(inst.Name, "Slot_") then
+			-- Kara listede değilse kontrol et
+			if not blacklistedNests[inst] then
+				-- Bölge kontrolü
+				local matchArea = true
+				if state.selectedArea ~= "Tümü" then
+					matchArea = string.find(inst:GetFullName(), state.selectedArea, 1, true) ~= nil
+				end
+
+				if matchArea then
+					local pos = inst:IsA("BasePart") and inst.Position or (inst:IsA("Model") and inst:GetPivot().Position)
+					if pos and validPosition(pos) then
+						local d = (pos - myPos).Magnitude
+						list[#list + 1] = { inst = inst, pos = pos, dist = d }
+					end
+				end
+			end
+		end
+	end
+
 	table.sort(list, function(a, b) return a.dist < b.dist end)
 	return list
 end
 
+-- ---------- ÇALMA DÖNGÜSÜ ----------
 local function stealCycle()
 	local char, _, root = getCharacter()
 	if not char then return false, "Karakter hazır değil." end
 
 	local targets = findStealTargets(root.Position)
-	if #targets == 0 then return false, "Yakında yumurta yuvası (EggSpot) bulunamadı." end
+	if #targets == 0 then
+		-- Eğer tüm yuvalar beklemedeyse kara listeyi sıfırla
+		blacklistedNests = {}
+		return false, "Seçilen bölgede aktif yuva kalmadı, bekleniyor..."
+	end
 
 	local target = targets[1]
 	local targetCF = CFrame.new(target.pos + Vector3.new(0, CONFIG.TeleportYOffset, 0))
@@ -282,48 +318,61 @@ local function stealCycle()
 	-- 1. Yuvaya ışınlan
 	local okTp, whyTp = teleportTo(targetCF)
 	if not okTp then return false, "Yuvaya ışınlanma başarısız: " .. whyTp end
-	task.wait(CONFIG.TeleportSettle)
+	task.wait(0.2)
 
-	-- 2. Deşifre edilen CarryAreaEgg prompt'unu bul
+	-- 2. Prompt'u anında patlat (0 saniye hold trick'i)
 	local stealPrompt = nil
 	local smartPart = Workspace:FindFirstChild("SmartPromptPart")
 	if smartPart then
 		for _, p in ipairs(smartPart:GetChildren()) do
 			if p:IsA("ProximityPrompt") and p.Name == "CarryAreaEgg" then
-				stealPrompt = p
-				break
+				stealPrompt = p; break
 			end
 		end
 	end
 
-	if not stealPrompt or not stealPrompt.Enabled then
+	if not stealPrompt then
 		for _, p in ipairs(Workspace:GetDescendants()) do
-			if p:IsA("ProximityPrompt") and (p.Name == "CarryAreaEgg" or p.ActionText == "Steal") and p.Enabled then
-				stealPrompt = p
-				break
+			if p:IsA("ProximityPrompt") and (p.Name == "CarryAreaEgg" or p.ActionText == "Steal") then
+				stealPrompt = p; break
 			end
 		end
 	end
 
-	-- 3. Çalmayı tetikle
 	if stealPrompt and typeof(fpp) == "function" then
-		setStatus("Yumurta çalınıyor (1.2s basılı tutuluyor)...")
+		stealPrompt.HoldDuration = 0
+		stealPrompt.RequiresLineOfSight = false
+		stealPrompt.MaxActivationDistance = 50
+		stealPrompt.Enabled = true
 		fpp(stealPrompt)
-		task.wait(CONFIG.StealHoldTime)
-	else
-		-- Alternatif: RemoteFunction ile çalmayı dene
-		pcall(function()
-			local net = ReplicatedStorage:FindFirstChild("Packages") and ReplicatedStorage.Packages:FindFirstChild("Networking")
-			local rf = net and net:FindFirstChild("RF/EggWorld/AskFieldEggCarry")
-			if rf then rf:InvokeServer(target.inst) end
-		end)
-		task.wait(0.4)
+		task.wait(0.25)
 	end
 
-	-- 4. Kendi base'ine geri dön
+	-- Alternatif / Destek: Remote ile çal
+	pcall(function()
+		local net = ReplicatedStorage:FindFirstChild("Packages") and ReplicatedStorage.Packages:FindFirstChild("Networking")
+		local rf = net and net:FindFirstChild("RF/EggWorld/AskFieldEggCarry")
+		if rf then rf:InvokeServer(target.inst) end
+	end)
+	task.wait(0.25)
+
+	-- Bu yuvayı geçici kara listeye al (boş yere tekrar tekrar gelmesin)
+	blacklistedNests[target.inst] = os.time() + CONFIG.NestCooldown
+
+	-- 3. Base'e dön
 	local okBack, whyBack = teleportTo(baseCFrame)
-	local backText = okBack and "Base'e dönüldü!" or ("Base'e dönülemedi: " .. whyBack)
-	return true, backText
+	if not okBack then return false, "Base'e dönülemedi: " .. whyBack end
+
+	-- 4. KRİTİK: Base'de yumurtayı teslim etme (Deposit / Drop) beklemesi & Remote tetiklemesi
+	setStatus("Base'de yumurta teslim ediliyor...")
+	pcall(function()
+		local net = ReplicatedStorage:FindFirstChild("Packages") and ReplicatedStorage.Packages:FindFirstChild("Networking")
+		local rfDrop = net and net:FindFirstChild("RF/EggWorld/AskFieldEggDrop")
+		if rfDrop then rfDrop:InvokeServer() end
+	end)
+	task.wait(CONFIG.BaseDepositWait)
+
+	return true, ("Çalındı -> Base'e teslim edildi! (Sıradaki yuvaya geçiliyor)")
 end
 
 local function setAutoSteal(on)
@@ -331,7 +380,7 @@ local function setAutoSteal(on)
 	local token = autoToken
 	if not on then
 		state.autoSteal = false
-		setStatus("Auto Steal kapatıldı.")
+		setStatus("Auto Steal durduruldu.")
 		return false
 	end
 	if baseCFrame == nil then
@@ -345,7 +394,7 @@ local function setAutoSteal(on)
 			local ok, success, msg = pcall(stealCycle)
 			if autoToken ~= token then break end
 			if not ok then
-				setStatus("Döngü hatası: " .. tostring(success))
+				setStatus("Hata: " .. tostring(success))
 			else
 				setStatus(msg)
 			end
@@ -355,7 +404,7 @@ local function setAutoSteal(on)
 	return true
 end
 
--- ---------- GUI Arayüzü ----------
+-- ---------- GUI ----------
 local ACCENT = CONFIG.Accent
 local function corner(inst, r)
 	local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r); c.Parent = inst
@@ -379,7 +428,7 @@ screen.DisplayOrder = 999
 screen.Parent = guiRoot
 
 local window = Instance.new("Frame")
-window.Size = UDim2.new(0, 330, 0.75, 0)
+window.Size = UDim2.new(0, 330, 0.78, 0)
 window.Position = UDim2.new(0.5, -165, 0.1, 0)
 window.BackgroundColor3 = Color3.fromRGB(18, 18, 26)
 window.BorderSizePixel = 0
@@ -387,7 +436,6 @@ window.Parent = screen
 corner(window, 12)
 stroke(window, ACCENT, 1.5)
 
--- Ekrandaki Aç/Kapa Düğmesi (A)
 local toggleBtn = Instance.new("TextButton")
 toggleBtn.Size = UDim2.fromOffset(44, 44)
 toggleBtn.Position = UDim2.new(0, 12, 0.5, -22)
@@ -406,7 +454,7 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, 0, 0, 42)
 title.BackgroundColor3 = Color3.fromRGB(26, 26, 38)
 title.BorderSizePixel = 0
-title.Text = "  AERO  •  Steal An Egg v3.0"
+title.Text = "  AERO  •  Steal An Egg v3.1 PRO"
 title.TextXAlignment = Enum.TextXAlignment.Left
 title.Font = Enum.Font.GothamBold
 title.TextSize = 15
@@ -414,7 +462,6 @@ title.TextColor3 = Color3.fromRGB(255, 255, 255)
 title.Parent = window
 corner(title, 12)
 
--- Pencereyi Sürükleme
 local dragging, dragStart, startPos = false, nil, nil
 title.InputBegan:Connect(function(input)
 	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
@@ -437,7 +484,6 @@ local content = Instance.new("ScrollingFrame")
 content.Position = UDim2.fromOffset(0, 48)
 content.Size = UDim2.new(1, 0, 1, -84)
 content.BackgroundTransparency = 1
-content.BorderSizePixel = 0
 content.ScrollBarThickness = 4
 content.AutomaticCanvasSize = Enum.AutomaticSize.Y
 content.Parent = window
@@ -453,7 +499,7 @@ statusLabel.Size = UDim2.new(1, -16, 0, 30)
 statusLabel.Position = UDim2.new(0, 8, 1, -34)
 statusLabel.BackgroundColor3 = Color3.fromRGB(26, 26, 38)
 statusLabel.BorderSizePixel = 0
-statusLabel.Text = "Hazır. Base'inde durup 'Base Konumunu Kaydet'e bas."
+statusLabel.Text = "Hazır. Base'de durup 'Base Konumunu Kaydet'e bas."
 statusLabel.TextWrapped = true
 statusLabel.Font = Enum.Font.Gotham
 statusLabel.TextSize = 12
@@ -529,28 +575,23 @@ local function addButton(text, callback)
 	corner(b, 8)
 	stroke(b, ACCENT, 1)
 	b.MouseButton1Click:Connect(callback)
+	return b
 end
 
-local function addTextBox(placeholder, onCommit)
-	local tb = Instance.new("TextBox")
-	tb.Size = UDim2.new(1, 0, 0, 34)
-	tb.BackgroundColor3 = Color3.fromRGB(30, 30, 42)
-	tb.PlaceholderText = placeholder
-	tb.PlaceholderColor3 = Color3.fromRGB(120, 120, 145)
-	tb.Text = ""
-	tb.ClearTextOnFocus = false
-	tb.Font = Enum.Font.Gotham
-	tb.TextSize = 13
-	tb.TextColor3 = Color3.fromRGB(235, 235, 245)
-	tb.TextXAlignment = Enum.TextXAlignment.Left
-	tb.Parent = content
-	corner(tb, 8)
-	local p = Instance.new("UIPadding"); p.PaddingLeft = UDim.new(0, 10); p.Parent = tb
-	tb.FocusLost:Connect(function() onCommit(tb.Text) end)
-end
+-- Butonları oluştur
+addHeader("BÖLGE & HEDEF SEÇİMİ")
+local availableAreas = getAvailableAreas()
+local areaIndex = 1
+areaBtn = addButton("Hedef Bölge: " .. state.selectedArea, function()
+	availableAreas = getAvailableAreas()
+	areaIndex = (areaIndex % #availableAreas) + 1
+	state.selectedArea = availableAreas[areaIndex]
+	areaBtn.Text = "Hedef Bölge: " .. state.selectedArea
+	blacklistedNests = {} -- Bölge değişince listeyi temizle
+	setStatus("Seçilen bölge: " .. state.selectedArea)
+end)
 
--- Butonları Ekle
-addHeader("AUTO STEAL (OTOMATİK ÇALMA)")
+addHeader("AUTO STEAL")
 addButton("1. Base Konumunu Kaydet (Base'de Dur)", function()
 	local _, _, root = getCharacter()
 	if not root then setStatus("Karakter yok."); return end
@@ -562,24 +603,16 @@ addButton("Base'e Işınlan", safe(function()
 	local ok, why = teleportTo(baseCFrame)
 	setStatus(ok and "Base'e ışınlandın." or ("Hata: " .. why))
 end))
-addToggle("AUTO STEAL (Yuva → Base)", function(on) return setAutoSteal(on) end)
+addToggle("AUTO STEAL (Çal & Teslim Et)", function(on) return setAutoSteal(on) end)
 
 addHeader("GÖRÜNÜM & HIZ")
 addToggle("Oyuncu ESP", function(on) setPlayerEsp(on) end)
 addToggle("Egg / Yuva ESP", function(on) setEggEsp(on) end)
-addTextBox(("Hız Değeri (%d-%d)"):format(CONFIG.MinSpeed, CONFIG.MaxSpeed), function(text)
-	local n = tonumber(text)
-	if n then
-		state.speed = math.clamp(n, CONFIG.MinSpeed, CONFIG.MaxSpeed)
-		setStatus(("Hız ayarlandı: %g"):format(state.speed))
-		if state.speedOn then applySpeed() end
-	end
-end)
-addToggle("Hız Ayarı", function(on) setSpeedOn(on) end)
+addToggle("Hız Ayarı (32)", function(on) setSpeedOn(on) end)
 
 addHeader("LOG")
 local logFrame = Instance.new("Frame")
-logFrame.Size = UDim2.new(1, 0, 0, 150)
+logFrame.Size = UDim2.new(1, 0, 0, 140)
 logFrame.BackgroundColor3 = Color3.fromRGB(12, 12, 18)
 logFrame.Parent = content
 corner(logFrame, 8)
@@ -608,7 +641,6 @@ addButton("Log'u Kopyala", function()
 	setStatus(ok and "Log panoya kopyalandı." or "Pano yok.")
 end)
 
--- Temizleme & Kapatma
 local function unload()
 	autoToken += 1
 	state.autoSteal = false
@@ -625,14 +657,6 @@ end
 env.__AeroSteal = unload
 
 addButton("Kapat (Unload)", unload)
-
--- Dinleyiciler
-track(Players.PlayerAdded:Connect(function(plr)
-	if plr == LocalPlayer then return end
-	track(plr.CharacterAdded:Connect(function() refreshPlayer(plr) end))
-	track(plr.CharacterRemoving:Connect(function() clearPlayer(plr) end))
-end))
-track(Players.PlayerRemoving:Connect(clearPlayer))
 
 track(RunService.Heartbeat:Connect(function()
 	if state.speedOn then applySpeed() end
