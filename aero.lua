@@ -1,4 +1,4 @@
--- AeroSteal v4.0 : Steal An Egg (Modern Tabbed UI, Anti-Guard & Smooth Runner)
+-- AeroSteal v4.1 : Steal An Egg (Derin Röntgen & Remote Spy)
 -- Menü: RightShift veya ekrandaki mor "A" düğmesi
 
 local Players = game:GetService("Players")
@@ -7,19 +7,15 @@ local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 local TweenService = game:GetService("TweenService")
+local HttpService = game:GetService("HttpService")
 
 local LocalPlayer = Players.LocalPlayer
 local fpp = fireproximityprompt
 
 -- ===== AYARLAR =====
 local CONFIG = {
-	RunHeight = 3.5,            -- Yerden süzülme yüksekliği (tuzakları aşmak için)
-	StealHoldTime = 1.25,        -- CarryAreaEgg hold süresi
-	BaseDepositWait = 0.8,       -- Base'de yumurta teslim süresi
-	CycleCooldown = 0.4,
-	DefaultSpeed = 70,           -- Koşma hızı
-	MinSpeed = 16,
-	MaxSpeed = 200,
+	RunHeight = 3.5,
+	DefaultSpeed = 70,
 	PlayerColor = Color3.fromRGB(255, 75, 75),
 	EggColor = Color3.fromRGB(255, 215, 0),
 	Accent = Color3.fromRGB(130, 95, 255),
@@ -45,19 +41,17 @@ local guiRoot = getGuiRoot()
 
 local state = {
 	playerEsp = false, eggEsp = false, autoSteal = false,
-	antiGuard = true, godMode = false,
-	speedOn = false, speed = CONFIG.DefaultSpeed,
+	antiGuard = true, remoteSpy = true,
+	speed = CONFIG.DefaultSpeed,
 	selectedArea = "Tümü",
-	activeTab = "AutoSteal",
+	activeTab = "RemoteSpy",
 }
 local connections = {}
 local playerRecords = {}
 local eggRecords = {}
 local baseCFrame = nil
-local autoToken = 0
 local screen, statusLabel, logLabel, logScroll
 local logLines = {}
-local nestIndex = 1
 local tabContainers = {}
 local tabButtons = {}
 
@@ -70,7 +64,7 @@ local function refreshLog()
 	for i = #logLines, 1, -1 do
 		local l = logLines[i]
 		total += #l + 1
-		if total > 10000 or #parts >= 150 then break end
+		if total > 14000 or #parts >= 200 then break end
 		parts[#parts + 1] = l
 	end
 	local n = #parts
@@ -85,15 +79,15 @@ local function log(text)
 	text = tostring(text)
 	print("[AeroSteal] " .. text)
 	logLines[#logLines + 1] = text
-	if #logLines > 800 then
-		logLines = table.move(logLines, #logLines - 599, #logLines, 1, {})
+	if #logLines > 1000 then
+		logLines = table.move(logLines, #logLines - 799, #logLines, 1, {})
 	end
+	refreshLog()
 end
 
 local function setStatus(text)
 	log(text)
 	if statusLabel then statusLabel.Text = text end
-	refreshLog()
 end
 
 local function copyText(text)
@@ -102,344 +96,111 @@ local function copyText(text)
 	return (pcall(fn, text))
 end
 
--- ---------- Karakter & Noclip ----------
-local function isFinite(v) return v == v and v ~= math.huge and v ~= -math.huge end
-local function validPosition(p) return isFinite(p.X) and isFinite(p.Y) and isFinite(p.Z) end
-
-local function getCharacter()
-	local char = LocalPlayer.Character
-	local hum = char and char:FindFirstChildOfClass("Humanoid")
-	local root = char and char:FindFirstChild("HumanoidRootPart")
-	if char and hum and hum.Health > 0 and root and root:IsA("BasePart") and validPosition(root.Position) then
-		return char, hum, root
+-- Serileştirici
+local function enc(val)
+	if typeof(val) == "Instance" then
+		return val:GetFullName()
+	elseif type(val) == "table" then
+		local ok, s = pcall(function() return HttpService:JSONEncode(val) end)
+		return ok and s or "tablo"
 	end
-	return nil
+	return tostring(val)
 end
 
-local function noclipChar()
-	local char = LocalPlayer.Character
-	if char then
-		for _, part in ipairs(char:GetDescendants()) do
-			if part:IsA("BasePart") and part.CanCollide then
-				part.CanCollide = false
-			end
-		end
-	end
-end
+-- ---------- 🕵️ REMOTE SPY (AĞ DİNLEYİCİSİ - ELİNLE ÇALDIĞINDA YAKALAR) ----------
+local hookActive = false
+local function initRemoteSpy()
+	if hookActive then return end
+	local ok, err = pcall(function()
+		local oldNamecall
+		oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+			local method = getnamecallmethod()
+			local args = { ... }
 
--- ---------- 🛡️ ANTİ-GUARD SİSTEMİ (ÖLÜMSÜZLÜK & MUHAFIZ ETKİSİZLEŞTİRME) ----------
-local function neutralizeGuards()
-	if not state.antiGuard then return end
-	local guardAreas = Workspace:FindFirstChild("World")
-		and Workspace.World:FindFirstChild("Areas")
-		and Workspace.World.Areas:FindFirstChild("GuardAreas")
+			if state.remoteSpy and (method == "FireServer" or method == "InvokeServer") then
+				local remoteName = self.Name:lower()
+				local fullPath = self:GetFullName()
 
-	if guardAreas then
-		for _, desc in ipairs(guardAreas:GetDescendants()) do
-			-- Muhafızların Collider, Hitbox ve TouchInterest'lerini kapat
-			if desc.Name == "Collider" or desc.Name == "HumanoidMass" or string.find(desc.Name:lower(), "hitbox") then
-				if desc:IsA("BasePart") then
-					desc.CanTouch = false
-					desc.CanCollide = false
-					desc.CanQuery = false
-				end
-			elseif desc:IsA("TouchTransmitter") then
-				desc:Destroy()
-			elseif desc:IsA("Humanoid") and desc.Parent and string.find(desc.Parent.Name:lower(), "guard") then
-				-- Muhafızın saldırmasını engelle
-				desc.WalkSpeed = 0
-			end
-		end
-	end
-
-	-- Yerdeki tuzakları da (PlayerTrap) etkisizleştir
-	local transient = Workspace:FindFirstChild("Transient")
-	if transient then
-		for _, trap in ipairs(transient:GetChildren()) do
-			if string.find(trap.Name:lower(), "trap") then
-				for _, p in ipairs(trap:GetDescendants()) do
-					if p:IsA("BasePart") then
-						p.CanTouch = false
-						p.CanCollide = false
+				-- Yumurta, çalma, taşıma veya alan ile ilgili tüm paketleri yakala
+				if string.find(remoteName, "egg") or string.find(remoteName, "carry") or string.find(remoteName, "steal")
+					or string.find(remoteName, "drop") or string.find(remoteName, "field") or string.find(fullPath:lower(), "eggworld") then
+					
+					local argStr = {}
+					for i, a in ipairs(args) do
+						argStr[#argStr + 1] = ("arg%d: %s"):format(i, enc(a))
 					end
+					log(("[SPY YAKALADI!] %s -> %s\n  Parametreler: %s"):format(method, fullPath, table.concat(argStr, " | ")))
+					copyText(("[SPY YAKALADI!] %s -> %s\n  Parametreler: %s"):format(method, fullPath, table.concat(argStr, " | ")))
 				end
 			end
-		end
-	end
-end
-
-track(RunService.Stepped:Connect(function()
-	if state.autoSteal then noclipChar() end
-	if state.antiGuard then neutralizeGuards() end
-end))
-
--- ---------- KESİNTİSİZ AKICI KOŞU MOTORU (IŞINLANMA YOK!) ----------
-local function smoothRunTo(targetPos)
-	local char, hum, root = getCharacter()
-	if not char then return false, "Karakter yok." end
-
-	local speed = math.clamp(state.speed, 20, 200)
-
-	while state.autoSteal do
-		local c, h, r = getCharacter()
-		if not c or h.Health <= 0 then return false, "Karakter öldü." end
-
-		local currentPos = r.Position
-		local diff = targetPos - currentPos
-		local dist = diff.Magnitude
-
-		if dist <= 3.5 then
-			r.AssemblyLinearVelocity = Vector3.zero
-			break
-		end
-
-		local step = math.min(dist, speed * 0.03)
-		local newPos = currentPos + (diff.Unit * step)
-
-		r.CFrame = CFrame.lookAt(newPos, newPos + diff.Unit)
-		r.AssemblyLinearVelocity = Vector3.zero
-		noclipChar()
-
-		task.wait(0.03)
-	end
-
-	return true, "Varıldı."
-end
-
--- ---------- ESP ----------
-local function makeMarker(adornee, color)
-	local gui = Instance.new("BillboardGui")
-	gui.Name = "AeroMarker"
-	gui.Adornee = adornee
-	gui.AlwaysOnTop = true
-	gui.Size = UDim2.fromOffset(160, 20)
-	gui.StudsOffset = Vector3.new(0, 3, 0)
-	local label = Instance.new("TextLabel")
-	label.BackgroundTransparency = 1
-	label.Size = UDim2.fromScale(1, 1)
-	label.TextColor3 = color
-	label.TextStrokeTransparency = 0.3
-	label.Font = Enum.Font.GothamBold
-	label.TextSize = 12
-	label.Text = ""
-	label.Parent = gui
-	gui.Parent = guiRoot
-	return gui, label
-end
-
-local function clearPlayer(plr)
-	local rec = playerRecords[plr]
-	if not rec then return end
-	playerRecords[plr] = nil
-	if rec.gui then rec.gui:Destroy() end
-	if rec.highlight then rec.highlight:Destroy() end
-end
-
-local function refreshPlayer(plr)
-	clearPlayer(plr)
-	if not state.playerEsp or plr == LocalPlayer then return end
-	local char = plr.Character
-	if not char then return end
-	task.spawn(function()
-		local root = char:WaitForChild("HumanoidRootPart", 4)
-		if not root or not root:IsA("BasePart") or not state.playerEsp or playerRecords[plr] then return end
-		local hl = Instance.new("Highlight")
-		hl.FillColor = CONFIG.PlayerColor
-		hl.FillTransparency = 0.7
-		hl.OutlineColor = CONFIG.PlayerColor
-		hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-		hl.Parent = char
-		local gui, label = makeMarker(root, CONFIG.PlayerColor)
-		playerRecords[plr] = { gui = gui, label = label, highlight = hl, adornee = root }
+			return oldNamecall(self, ...)
+		end)
 	end)
-end
-
-local function setPlayerEsp(on)
-	state.playerEsp = on
-	for _, plr in ipairs(Players:GetPlayers()) do
-		if on then refreshPlayer(plr) else clearPlayer(plr) end
-	end
-end
-
-local function clearEgg(inst)
-	local rec = eggRecords[inst]
-	if not rec then return end
-	eggRecords[inst] = nil
-	if rec.gui then rec.gui:Destroy() end
-end
-
-local function considerEgg(inst)
-	if eggRecords[inst] then return end
-	if inst.Name == "EggSpotBottom" or inst.Name == "EggFitBounds" then
-		local p = inst:IsA("BasePart") and inst or inst:FindFirstChildWhichIsA("BasePart")
-		if p then
-			local gui, label = makeMarker(p, CONFIG.EggColor)
-			eggRecords[inst] = { gui = gui, label = label, adornee = p }
-			track(inst.Destroying:Connect(function() clearEgg(inst) end))
-		end
-	end
-end
-
-local function setEggEsp(on)
-	state.eggEsp = on
-	if on then
-		for _, inst in ipairs(Workspace:GetDescendants()) do considerEgg(inst) end
+	if ok then
+		hookActive = true
+		log("[Remote Spy] Aktif! Şimdi elinle gidip 1 tane yumurta çal, paket anında buraya düşecek.")
 	else
-		for inst in pairs(eggRecords) do clearEgg(inst) end
+		log("[Remote Spy] Hook açılamadı: " .. tostring(err))
 	end
 end
 
--- ---------- BÖLGE LİSTESİ ----------
-local function getAvailableAreas()
-	local areas = { "Tümü", "Forest" }
-	local guardAreas = Workspace:FindFirstChild("World")
-		and Workspace.World:FindFirstChild("Areas")
-		and Workspace.World.Areas:FindFirstChild("GuardAreas")
+-- ---------- 🔍 DERİN ÇEVRE RÖNTGENİ (YANINDA DURDUĞUN YERİ İNCELER) ----------
+local function deepInspectNear()
+	local char = LocalPlayer.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if not root then setStatus("Karakter yok."); return end
 
-	if guardAreas then
-		for _, child in ipairs(guardAreas:GetChildren()) do
-			local exists = false
-			for _, a in ipairs(areas) do if a == child.Name then exists = true; break end end
-			if not exists then areas[#areas + 1] = child.Name end
-		end
-	end
-	return areas
-end
+	log("========== DERİN ÇEVRE RÖNTGENİ ==========")
+	log(("Oyuncu Konumu: (%.1f, %.1f, %.1f)"):format(root.Position.X, root.Position.Y, root.Position.Z))
 
-local function getAllNests()
-	local nests = {}
-	local guardAreas = Workspace:FindFirstChild("World")
-		and Workspace.World:FindFirstChild("Areas")
-		and Workspace.World.Areas:FindFirstChild("GuardAreas")
-
-	local scanRoot = guardAreas or Workspace
-	for _, inst in ipairs(scanRoot:GetDescendants()) do
-		if inst.Name == "EggSpotBottom" and inst:IsA("BasePart") then
-			local match = true
-			if state.selectedArea ~= "Tümü" then
-				match = string.find(inst:GetFullName(), state.selectedArea, 1, true) ~= nil
-			end
-			if match and validPosition(inst.Position) then
-				nests[#nests + 1] = { inst = inst, pos = inst.Position }
+	-- 1. Yakındaki (25 stud) tüm ProximityPrompt'lar
+	log("-- YAKINDAKİ PROMPT'LAR --")
+	local promptCount = 0
+	for _, inst in ipairs(Workspace:GetDescendants()) do
+		if inst:IsA("ProximityPrompt") then
+			local pPos = inst.Parent and (inst.Parent:IsA("BasePart") and inst.Parent.Position or (inst.Parent:IsA("Model") and inst.Parent:GetPivot().Position))
+			if pPos then
+				local dist = (root.Position - pPos).Magnitude
+				if dist <= 25 then
+					promptCount += 1
+					log(("Prompt: %s | Action=%q Object=%q Enabled=%s Hold=%.2f Mesafe=%.1fm"):format(
+						inst:GetFullName(), inst.ActionText, inst.ObjectText, tostring(inst.Enabled), inst.HoldDuration, dist
+					))
+				end
 			end
 		end
 	end
-	return nests
-end
+	if promptCount == 0 then log("25 stud içinde hiç ProximityPrompt yok.") end
 
--- ---------- ÇALMA DÖNGÜSÜ ----------
-local function stealCycle()
-	local char, hum, root = getCharacter()
-	if not char then return false, "Karakter hazır değil." end
-
-	local nests = getAllNests()
-	if #nests == 0 then
-		return false, ("'%s' bölgesinde yuva bulunamadı."):format(state.selectedArea)
-	end
-
-	if nestIndex > #nests then nestIndex = 1 end
-	local currentTarget = nests[nestIndex]
-	local targetNumber = nestIndex
-	nestIndex = (nestIndex % #nests) + 1
-
-	-- Yerden 3.5 stud yüksekten süzülerek hedefe git
-	local targetPos = currentTarget.pos + Vector3.new(0, CONFIG.RunHeight, 0)
-
-	setStatus(("Yuva %d/%d doğru akıcı koşuluyor..."):format(targetNumber, #nests))
-	local okRun, whyRun = smoothRunTo(targetPos)
-	if not okRun then return false, "Yuvaya ulaşılamadı: " .. whyRun end
-
-	task.wait(0.15)
-
-	-- Prompt'u bul
-	local stealPrompt = nil
-	local smartPart = Workspace:FindFirstChild("SmartPromptPart")
-	if smartPart then
-		for _, p in ipairs(smartPart:GetChildren()) do
-			if p:IsA("ProximityPrompt") and (p.Name == "CarryAreaEgg" or p.ActionText == "Steal") and p.Enabled then
-				stealPrompt = p; break
-			end
-		end
-	end
-
-	if not stealPrompt then
-		for _, p in ipairs(Workspace:GetDescendants()) do
-			if p:IsA("ProximityPrompt") and (p.Name == "CarryAreaEgg" or p.ActionText == "Steal") and p.Enabled then
-				local dist = (root.Position - p.Parent.Position).Magnitude
-				if dist <= 20 then
-					stealPrompt = p; break
+	-- 2. Yakındaki Modeller ve Attribute'lar
+	log("-- YAKINDAKİ NESNELER (15 stud) --")
+	for _, inst in ipairs(Workspace:GetDescendants()) do
+		if (inst:IsA("Model") or inst:IsA("BasePart")) and not inst:IsDescendantOf(char) then
+			local pPos = inst:IsA("BasePart") and inst.Position or (inst:IsA("Model") and inst:GetPivot().Position)
+			if pPos and (root.Position - pPos).Magnitude <= 15 then
+				local attrs = inst:GetAttributes()
+				local attrStr = ""
+				for k, v in pairs(attrs) do attrStr = attrStr .. tostring(k) .. "=" .. tostring(v) .. "; " end
+				if attrStr ~= "" or string.find(inst.Name:lower(), "egg") or string.find(inst.Name:lower(), "spot") then
+					log(("[%s] %s | Attr: %s"):format(inst.ClassName, inst:GetFullName(), attrStr ~= "" and attrStr or "yok"))
 				end
 			end
 		end
 	end
 
-	-- Yuva boşsa anında sıradakine geç
-	if not stealPrompt then
-		setStatus(("Yuva %d boş çıktı, sıradakine koşuluyor..."):format(targetNumber))
-		return true, "Boş yuva atlandı."
-	end
-
-	-- Yumurta var! Çalmayı başlat
-	setStatus(("Yuva %d DOLU! Yumurta çalınıyor..."):format(targetNumber))
-	if typeof(fpp) == "function" then
-		fpp(stealPrompt)
-		task.wait(CONFIG.StealHoldTime)
-	end
-
-	pcall(function()
-		local net = ReplicatedStorage:FindFirstChild("Packages") and ReplicatedStorage.Packages:FindFirstChild("Networking")
-		local rf = net and net:FindFirstChild("RF/EggWorld/AskFieldEggCarry")
-		if rf then rf:InvokeServer(currentTarget.inst) end
-	end)
-	task.wait(0.15)
-
-	-- Base'e doğru akıcı koş
-	setStatus("Base'e koşuluyor...")
-	local okBack, whyBack = smoothRunTo(baseCFrame.Position + Vector3.new(0, 1.5, 0))
-	if not okBack then return false, "Base'e dönülemedi: " .. whyBack end
-
-	-- Base teslimatı
-	setStatus("Yumurta teslim ediliyor...")
-	pcall(function()
-		local net = ReplicatedStorage:FindFirstChild("Packages") and ReplicatedStorage.Packages:FindFirstChild("Networking")
-		local rfDrop = net and net:FindFirstChild("RF/EggWorld/AskFieldEggDrop")
-		if rfDrop then rfDrop:InvokeServer() end
-	end)
-	task.wait(CONFIG.BaseDepositWait)
-
-	return true, ("Yumurta getirildi! (Yuva %d)"):format(targetNumber)
-end
-
-local function setAutoSteal(on)
-	autoToken += 1
-	local token = autoToken
-	if not on then
-		state.autoSteal = false
-		setStatus("Auto Steal durduruldu.")
-		return false
-	end
-	if baseCFrame == nil then
-		state.autoSteal = false
-		setStatus("HATA: Önce base'inde durup 'Base Konumunu Kaydet'e bas!")
-		return false
-	end
-	state.autoSteal = true
-	task.spawn(function()
-		while autoToken == token and state.autoSteal do
-			local ok, success, msg = pcall(stealCycle)
-			if autoToken ~= token then break end
-			if not ok then
-				setStatus("Hata: " .. tostring(success))
-			else
-				setStatus(msg)
-			end
-			task.wait(CONFIG.CycleCooldown)
+	-- 3. Oyuncunun elindeki / çantasındaki nesneler
+	log("-- KARAKTER DURUMU --")
+	for _, c in ipairs(char:GetChildren()) do
+		if c:IsA("Tool") or c:IsA("Model") then
+			log(("Karakter içi: [%s] %s"):format(c.ClassName, c.Name))
 		end
-	end)
-	return true
+	end
+	log("========== RÖNTGEN BİTTİ ==========")
+	copyText(table.concat(logLines, "\n", #logLines - 30, #logLines))
+	setStatus("Röntgen tamamlandı, log'a yazıldı ve panoya kopyalandı!")
 end
 
--- ---------- 🎨 MODERN DİKDÖRTGEN SEKME GUI ----------
+-- ---------- GUI ----------
 local ACCENT = CONFIG.Accent
 local function corner(inst, r)
 	local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r); c.Parent = inst
@@ -462,10 +223,9 @@ screen.ResetOnSpawn = false
 screen.DisplayOrder = 999
 screen.Parent = guiRoot
 
--- Ana Dikdörtgen Pencere (520x330)
 local mainFrame = Instance.new("Frame")
-mainFrame.Size = UDim2.fromOffset(520, 330)
-mainFrame.Position = UDim2.new(0.5, -260, 0.5, -165)
+mainFrame.Size = UDim2.fromOffset(530, 340)
+mainFrame.Position = UDim2.new(0.5, -265, 0.5, -170)
 mainFrame.BackgroundColor3 = CONFIG.DarkBg
 mainFrame.BorderSizePixel = 0
 mainFrame.Parent = screen
@@ -487,7 +247,6 @@ corner(toggleBtn, 21)
 stroke(toggleBtn, ACCENT, 1.5)
 toggleBtn.MouseButton1Click:Connect(function() mainFrame.Visible = not mainFrame.Visible end)
 
--- Üst Başlık Çubuğu
 local topBar = Instance.new("Frame")
 topBar.Size = UDim2.new(1, 0, 0, 38)
 topBar.BackgroundColor3 = CONFIG.SidebarBg
@@ -499,10 +258,10 @@ local titleText = Instance.new("TextLabel")
 titleText.Size = UDim2.new(1, -20, 1, 0)
 titleText.Position = UDim2.fromOffset(12, 0)
 titleText.BackgroundTransparency = 1
-titleText.Text = "AERO HUB  •  Steal An Egg v4.0 PRO"
+titleText.Text = "AERO HUB  •  Derin Röntgen & Remote Spy v4.1"
 titleText.TextXAlignment = Enum.TextXAlignment.Left
 titleText.Font = Enum.Font.GothamBold
-titleText.TextSize = 14
+titleText.TextSize = 13
 titleText.TextColor3 = Color3.fromRGB(255, 255, 255)
 titleText.Parent = topBar
 
@@ -525,7 +284,6 @@ track(UserInputService.InputEnded:Connect(function(input)
 	end
 end))
 
--- Sol Kenar Çubuğu (Kategoriler)
 local sidebar = Instance.new("Frame")
 sidebar.Size = UDim2.new(0, 135, 1, -38)
 sidebar.Position = UDim2.fromOffset(0, 38)
@@ -541,20 +299,18 @@ local sidebarPad = Instance.new("UIPadding")
 sidebarPad.PaddingTop = UDim.new(0, 8); sidebarPad.PaddingLeft = UDim.new(0, 6); sidebarPad.PaddingRight = UDim.new(0, 6)
 sidebarPad.Parent = sidebar
 
--- Sağ İçerik Alanı
 local contentArea = Instance.new("Frame")
 contentArea.Size = UDim2.new(1, -145, 1, -78)
 contentArea.Position = UDim2.fromOffset(140, 44)
 contentArea.BackgroundTransparency = 1
 contentArea.Parent = mainFrame
 
--- Alt Durum Çubuğu
 statusLabel = Instance.new("TextLabel")
 statusLabel.Size = UDim2.new(1, -145, 0, 26)
 statusLabel.Position = UDim2.new(0, 140, 1, -30)
 statusLabel.BackgroundColor3 = CONFIG.CardBg
 statusLabel.BorderSizePixel = 0
-statusLabel.Text = "Hazır. Base'de durup 'Base Konumunu Kaydet'e bas."
+statusLabel.Text = "Spy Devrede. Elinle bir yumurta çal, logu buraya yapıştıracağız."
 statusLabel.Font = Enum.Font.Gotham
 statusLabel.TextSize = 11
 statusLabel.TextColor3 = Color3.fromRGB(180, 180, 210)
@@ -563,7 +319,6 @@ statusLabel.Parent = mainFrame
 corner(statusLabel, 6)
 local statPad = Instance.new("UIPadding"); statPad.PaddingLeft = UDim.new(0, 8); statPad.Parent = statusLabel
 
--- Sekme Değiştirme Fonksiyonu
 local function switchTab(tabName)
 	state.activeTab = tabName
 	for name, container in pairs(tabContainers) do
@@ -611,52 +366,9 @@ local function addTab(name, iconText)
 	return container
 end
 
--- Arayüz Bileşen Üreticileri
-local function addCardToggle(container, text, callback, defaultOn)
-	local row = Instance.new("Frame")
-	row.Size = UDim2.new(1, 0, 0, 34)
-	row.BackgroundColor3 = CONFIG.CardBg
-	row.Parent = container
-	corner(row, 6)
-	local lbl = Instance.new("TextLabel")
-	lbl.BackgroundTransparency = 1
-	lbl.Size = UDim2.new(1, -60, 1, 0)
-	lbl.Position = UDim2.fromOffset(10, 0)
-	lbl.Text = text
-	lbl.TextXAlignment = Enum.TextXAlignment.Left
-	lbl.Font = Enum.Font.Gotham
-	lbl.TextSize = 13
-	lbl.TextColor3 = Color3.fromRGB(235, 235, 245)
-	lbl.Parent = row
-
-	local pill = Instance.new("TextButton")
-	pill.Size = UDim2.fromOffset(40, 20)
-	pill.Position = UDim2.new(1, -48, 0.5, -10)
-	pill.Text = ""
-	pill.AutoButtonColor = false
-	pill.Parent = row
-	corner(pill, 10)
-	local knob = Instance.new("Frame")
-	knob.Size = UDim2.fromOffset(14, 14)
-	knob.Position = defaultOn and UDim2.fromOffset(23, 3) or UDim2.fromOffset(3, 3)
-	knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-	knob.Parent = pill
-	corner(knob, 7)
-
-	local on = defaultOn or false
-	pill.BackgroundColor3 = on and ACCENT or Color3.fromRGB(60, 60, 75)
-
-	pill.MouseButton1Click:Connect(function()
-		on = not on
-		pill.BackgroundColor3 = on and ACCENT or Color3.fromRGB(60, 60, 75)
-		TweenService:Create(knob, TweenInfo.new(0.1), { Position = on and UDim2.fromOffset(23, 3) or UDim2.fromOffset(3, 3) }):Play()
-		callback(on)
-	end)
-end
-
 local function addCardButton(container, text, callback)
 	local b = Instance.new("TextButton")
-	b.Size = UDim2.new(1, 0, 0, 32)
+	b.Size = UDim2.new(1, 0, 0, 34)
 	b.BackgroundColor3 = CONFIG.CardBg
 	b.Text = text
 	b.Font = Enum.Font.GothamBold
@@ -669,82 +381,18 @@ local function addCardButton(container, text, callback)
 	return b
 end
 
-local function addCardTextBox(container, placeholder, onCommit)
-	local tb = Instance.new("TextBox")
-	tb.Size = UDim2.new(1, 0, 0, 32)
-	tb.BackgroundColor3 = CONFIG.CardBg
-	tb.PlaceholderText = placeholder
-	tb.PlaceholderColor3 = Color3.fromRGB(120, 120, 140)
-	tb.Text = ""
-	tb.Font = Enum.Font.Gotham
-	tb.TextSize = 12
-	tb.TextColor3 = Color3.fromRGB(240, 240, 255)
-	tb.Parent = container
-	corner(tb, 6)
-	local p = Instance.new("UIPadding"); p.PaddingLeft = UDim.new(0, 10); p.Parent = tb
-	tb.FocusLost:Connect(function() onCommit(tb.Text) end)
-end
+-- ==================== SEKMELER ====================
 
--- ==================== SEKMELERİ OLUŞTUR ====================
+-- 1. SEKME: REMOTE SPY (AĞ DİNLEYİCİSİ)
+local tabSpy = addTab("Remote Spy", "🕵️")
+addCardButton(tabSpy, "Remote Spy'ı Yeniden Başlat", safe(initRemoteSpy))
+addCardButton(tabSpy, "Yuvanın Yanında Dur & 'Derin Röntgen Çek'", safe(deepInspectNear))
 
--- 1. SEKME: AUTO STEAL
-local tabAuto = addTab("Auto Steal", "🥚")
-local availableAreas = getAvailableAreas()
-local areaIdx = 1
-local areaSelectBtn = addCardButton(tabAuto, "Hedef Bölge: " .. state.selectedArea, function()
-	availableAreas = getAvailableAreas()
-	areaIdx = (areaIdx % #availableAreas) + 1
-	state.selectedArea = availableAreas[areaIdx]
-	areaSelectBtn.Text = "Hedef Bölge: " .. state.selectedArea
-	nestIndex = 1
-	setStatus("Bölge seçildi: " .. state.selectedArea)
-end)
-addCardButton(tabAuto, "Base Konumunu Kaydet (Base'de Dur)", function()
-	local _, _, root = getCharacter()
-	if not root then setStatus("Karakter yok."); return end
-	baseCFrame = root.CFrame
-	setStatus("Base kaydedildi! Şimdi Auto Steal'i açabilirsin.")
-end)
-addCardButton(tabAuto, "Base'e Akıcı Koş", safe(function()
-	if baseCFrame == nil then setStatus("Önce base konumunu kaydet."); return end
-	smoothRunTo(baseCFrame.Position + Vector3.new(0, 1.5, 0))
-end))
-addCardToggle(tabAuto, "AUTO STEAL (Akıcı Koş & Çal)", function(on) setAutoSteal(on) end, false)
-
--- 2. SEKME: ANTİ-GUARD (GÜVENLİK)
-local tabGuard = addTab("Anti-Guard", "🛡️")
-addCardToggle(tabGuard, "Anti-Guard & Tuzak İptali (Ölümsüzlük)", function(on)
-	state.antiGuard = on
-	setStatus(on and "Anti-Guard devrede (Muhafızlar etkisiz)." or "Anti-Guard kapatıldı.")
-end, true)
-addCardButton(tabGuard, "Tüm Muhafızları Şimdi Etkisizleştir", safe(neutralizeGuards))
-
--- 3. SEKME: HIZ & HAREKET
-local tabMove = addTab("Hareket", "⚡")
-addCardTextBox(tabMove, ("Koşu Hızı Ayarla (Şu an: %d)"):format(state.speed), function(txt)
-	local n = tonumber(txt)
-	if n then
-		state.speed = math.clamp(n, CONFIG.MinSpeed, CONFIG.MaxSpeed)
-		setStatus(("Hız ayarlandı: %d"):format(state.speed))
-	end
-end)
-addCardToggle(tabMove, "Karakter WalkSpeed Hilesi", function(on)
-	state.speedOn = on
-	local _, hum = getCharacter()
-	if hum then hum.WalkSpeed = on and state.speed or 16 end
-end, false)
-
--- 4. SEKME: ESP & GÖRÜNÜM
-local tabEsp = addTab("Görünüm", "👁️")
-addCardToggle(tabEsp, "Oyuncu ESP", function(on) setPlayerEsp(on) end, false)
-addCardToggle(tabEsp, "Yuva ESP", function(on) setEggEsp(on) end, false)
-
--- 5. SEKME: LOGLAR
-local tabLog = addTab("Loglar", "📜")
+-- Log Kutusu (Büyük)
 local logBox = Instance.new("Frame")
-logBox.Size = UDim2.new(1, 0, 0, 160)
-logBox.BackgroundColor3 = Color3.fromRGB(12, 12, 16)
-logBox.Parent = tabLog
+logBox.Size = UDim2.new(1, 0, 0, 170)
+logBox.BackgroundColor3 = Color3.fromRGB(10, 10, 14)
+logBox.Parent = tabSpy
 corner(logBox, 6)
 
 logScroll = Instance.new("ScrollingFrame")
@@ -759,29 +407,27 @@ logLabel = Instance.new("TextLabel")
 logLabel.Size = UDim2.new(1, -4, 0, 0)
 logLabel.AutomaticSize = Enum.AutomaticSize.Y
 logLabel.BackgroundTransparency = 1
-logLabel.Text = ""
+logLabel.Text = "Spy bekleniyor... Oyunda bir yumurta çalınca paketler buraya akacak."
 logLabel.TextWrapped = true
 logLabel.TextXAlignment = Enum.TextXAlignment.Left
 logLabel.TextYAlignment = Enum.TextYAlignment.Top
 logLabel.Font = Enum.Font.Code
 logLabel.TextSize = 11
-logLabel.TextColor3 = Color3.fromRGB(180, 220, 180)
+logLabel.TextColor3 = Color3.fromRGB(160, 255, 160)
 logLabel.Parent = logScroll
 
-addCardButton(tabLog, "Log'u Panoya Kopyala", function()
+addCardButton(tabSpy, "Tüm Logları Panoya Kopyala", function()
 	local ok = copyText(table.concat(logLines, "\n"))
-	setStatus(ok and "Log panoya kopyalandı." or "Pano fonksiyonu yok.")
+	setStatus(ok and "Log panoya kopyalandı!" or "Pano yok.")
 end)
 
--- Varsayılan Sekmeyi Aç
-switchTab("Auto Steal")
+-- Varsayılan Sekme
+switchTab("Remote Spy")
+initRemoteSpy()
 
--- Kapatma Fonksiyonu
+-- Kapatma
 local function unload()
-	autoToken += 1
-	state.autoSteal = false
-	setEggEsp(false)
-	setPlayerEsp(false)
+	state.remoteSpy = false
 	for _, c in ipairs(connections) do c:Disconnect() end
 	table.clear(connections)
 	if screen then screen:Destroy(); screen = nil end
@@ -790,7 +436,6 @@ local function unload()
 end
 env.__AeroSteal = unload
 
--- Kısayollar
 track(UserInputService.InputBegan:Connect(function(input, processed)
 	if processed then return end
 	if input.KeyCode == Enum.KeyCode.RightShift and screen then
@@ -798,4 +443,4 @@ track(UserInputService.InputBegan:Connect(function(input, processed)
 	end
 end))
 
-setStatus("AERO v4.0 Yüklendi! Base'de durup 'Base Konumunu Kaydet'e bas.")
+setStatus("Remote Spy Aktif! Git elinle 1 yumurta çal, logu yakalayalım.")
