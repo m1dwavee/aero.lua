@@ -1,5 +1,5 @@
 -- ======================================================================
--- AeroSteal v9.0 FINAL - Auto Best Egg Stealer & Game Code Extractor
+-- AeroSteal v9.5 - Robust Link Box & Auto Stealer
 -- ======================================================================
 
 local Players = game:GetService("Players")
@@ -12,7 +12,7 @@ local LocalPlayer = Players.LocalPlayer
 local fpp = fireproximityprompt
 
 -- ======================================================================
--- OYUNUN ALAN (AREA) VE TIER HARİTASI (En İyiden En Kötüye)
+-- BÖLGE TIER TABLOSU (En İyiden En Düşüğe)
 -- ======================================================================
 local AREA_TIERS = {
     ["Alien"]            = 15,
@@ -51,9 +51,7 @@ local AREA_LIST = {
     "Forest"
 }
 
--- ======================================================================
--- MODÜLLER (Hata Korumalı)
--- ======================================================================
+-- Modüller
 local EggState = nil
 local AreaData = nil
 local AssetData = nil
@@ -64,30 +62,19 @@ pcall(function() AreaData = require(ReplicatedStorage.Data.Areas) end)
 pcall(function() AssetData = require(ReplicatedStorage.Data.Assets) end)
 pcall(function() SlotIdentity = require(ReplicatedStorage.Shared.Util.AreaEggSlotIdentity) end)
 
--- SeparationLine (Sınır Çizgisi - 1-A Kuralı: Bu çizgiyi geçince yumurta teslim sayılır!)
 local function GetSeparationLine()
     local areas = Workspace:FindFirstChild("World") and Workspace.World:FindFirstChild("Areas")
     return areas and areas:FindFirstChild("SeparationLine")
 end
 
--- ======================================================================
--- DURUM & AYARLAR
--- ======================================================================
+-- Durum Değişkenleri
 local State = {
     AutoSteal = false,
     Speed = 70,
     SelectedArea = "Tümü (En İyisi Önce)",
-    BasePosition = nil,
     StolenCount = 0,
     Status = "Hazır",
-    LogLines = {},
 }
-
-local function Log(msg)
-    print("[AeroSteal] " .. tostring(msg))
-    table.insert(State.LogLines, tostring(msg))
-    if #State.LogLines > 100 then table.remove(State.LogLines, 1) end
-end
 
 local function GetCharacter()
     local char = LocalPlayer.Character
@@ -100,7 +87,7 @@ local function GetCharacter()
 end
 
 -- ======================================================================
--- KESİN ÇALIŞAN AKICI HIZ / KOŞU MOTORU (Fizik Engeline Takılmaz)
+-- AKICI HIZLI KOŞU MOTORU
 -- ======================================================================
 local function RunTo(targetPos)
     local char, hum, root = GetCharacter()
@@ -115,7 +102,6 @@ local function RunTo(targetPos)
 
         if dist <= 3.5 then break end
 
-        -- Saniyede State.Speed stud akıcı ilerleme
         local step = math.min(dist, State.Speed * 0.033)
         local newPos = r.Position + (diff.Unit * step)
 
@@ -126,7 +112,6 @@ local function RunTo(targetPos)
     return true
 end
 
--- Noclip (Koşarken ağaçlara, yuvalara veya duvarlara çarpıp durmaz)
 RunService.Stepped:Connect(function()
     if State.AutoSteal then
         local char = LocalPlayer.Character
@@ -141,16 +126,13 @@ RunService.Stepped:Connect(function()
 end)
 
 -- ======================================================================
--- EN İYİ YUMURTAYI SEÇME (Oyun Kodlarını Doğrudan Okur)
+-- HEDEF BULUCU (Oyun Verilerine Göre)
 -- ======================================================================
 local function ScoreEggRecord(egg)
     local score = 0
-
-    -- 1. Kriter: Hangi Bölgenin Yumurtası? (Alien = 150000, Volcano = 130000, Forest = 10000)
     local tier = AREA_TIERS[egg.AreaId] or 1
     score = score + (tier * 100000)
 
-    -- 2. Kriter: Pet Nadirliği (Asset Kataloğu Kontrolü)
     if AssetData and AssetData.Directory and AssetData.Directory[egg.AssetCategory] then
         local entry = AssetData.Directory[egg.AssetCategory]
         if entry.Rarity then
@@ -163,10 +145,8 @@ local function ScoreEggRecord(egg)
         end
     end
 
-    -- 3. Kriter: Boyut / Ağırlık Çarpanı (Büyük Petler Daha Pahalı)
     score = score + ((egg.AssetScale or 1) * 2000)
 
-    -- 4. Kriter: Mutasyon Varsa Ek Puan (Bonus)
     if egg.Mutations and #egg.Mutations > 0 then
         for _, mut in ipairs(egg.Mutations) do
             if string.find(mut, "Rainbow") then score = score + 15000
@@ -182,7 +162,6 @@ local function FindBestTarget()
     local best = nil
     local maxScore = -math.huge
 
-    -- 1. Yol: İstemci EggState Modülü Açık İse
     if EggState then
         local ok, data = pcall(function() return EggState.ReadFieldEggs() end)
         if ok and data and data.Records then
@@ -198,7 +177,6 @@ local function FindBestTarget()
                                 NestId = egg.NestId,
                                 Name = egg.AssetCategory,
                                 Position = egg.BottomCFrame.Position,
-                                EggRef = egg,
                             }
                         end
                     end
@@ -207,14 +185,12 @@ local function FindBestTarget()
         end
     end
 
-    -- 2. Yol: Eğer EggState nil ise doğrudan GuardAreas nesnelerini en yüksek alandan tarar
     if not best then
         local guardAreas = Workspace:FindFirstChild("World")
             and Workspace.World:FindFirstChild("Areas")
             and Workspace.World.Areas:FindFirstChild("GuardAreas")
 
         if guardAreas then
-            -- En yüksek alandan en düşüğe doğru tara
             for _, areaName in ipairs(AREA_LIST) do
                 if areaName ~= "Tümü (En İyisi Önce)" then
                     if State.SelectedArea == "Tümü (En İyisi Önce)" or State.SelectedArea == areaName then
@@ -245,11 +221,7 @@ local function FindBestTarget()
     return best
 end
 
--- ======================================================================
--- ÇALMA EYLEMİ
--- ======================================================================
 local function PickupEgg(target)
-    -- Remote ile al
     if target.Uid and EggState and SlotIdentity then
         local slotKey = nil
         if SlotIdentity.LooksLikeFirstAreaUid(target.Uid) then
@@ -258,10 +230,8 @@ local function PickupEgg(target)
         pcall(function() EggState.CarryFieldEgg(target.Uid, slotKey) end)
     end
 
-    -- ProximityPrompt ile al
     local _, _, root = GetCharacter()
     if root then
-        -- 1. SmartPromptPart
         local smart = Workspace:FindFirstChild("SmartPromptPart")
         if smart then
             for _, p in ipairs(smart:GetChildren()) do
@@ -273,7 +243,6 @@ local function PickupEgg(target)
             end
         end
 
-        -- 2. Yakındaki CarryAreaEgg promptları
         for _, p in ipairs(Workspace:GetDescendants()) do
             if p:IsA("ProximityPrompt") and (p.Name == "CarryAreaEgg" or p.ActionText == "Steal") then
                 if p.Parent and (p.Parent.Position - root.Position).Magnitude <= 20 then
@@ -286,25 +255,13 @@ local function PickupEgg(target)
     end
 end
 
--- ======================================================================
--- 1-A TESLİMAT KURALI (SeparationLine Arkasına Kaçış)
--- ======================================================================
+-- 1-A KURALI (SeparationLine Teslimatı)
 local function DeliverEgg()
     local sepLine = GetSeparationLine()
-    local deliverTarget = nil
-
     if sepLine then
-        -- SeparationLine'ın 15 stud güvenli tarafına koş (Hemen teslim olur!)
-        deliverTarget = sepLine.Position + Vector3.new(-18, 0, 0)
-    elseif State.BasePosition then
-        deliverTarget = State.BasePosition.Position
+        RunTo(sepLine.Position + Vector3.new(-18, 0, 0))
     end
 
-    if deliverTarget then
-        RunTo(deliverTarget)
-    end
-
-    -- Teslimatın düşmesini bekle
     local timeout = os.clock() + 3
     while State.AutoSteal and os.clock() < timeout do
         local isCarrying = false
@@ -316,9 +273,7 @@ local function DeliverEgg()
     end
 end
 
--- ======================================================================
--- ANA AUTO-STEAL DÖNGÜSÜ
--- ======================================================================
+-- Ana Döngü
 task.spawn(function()
     while true do
         task.wait(0.2)
@@ -328,15 +283,12 @@ task.spawn(function()
                 pcall(function() isCarrying = EggState.ReadCarryState().IsCarrying end)
             end
 
-            -- 1. Durum: Elimizde yumurta varsa -> Doğrudan SeparationLine'a koş ve teslim et!
             if isCarrying then
-                State.Status = "🏃 SeparationLine'a kaçılıyor..."
+                State.Status = "🏃 SeparationLine'a koşuluyor..."
                 DeliverEgg()
                 State.StolenCount = State.StolenCount + 1
-                State.Status = "✅ Yumurta Teslim Edildi!"
-                task.wait(0.3)
-
-            -- 2. Durum: El boşsa -> En iyi yumurtayı tespit et ve koş!
+                State.Status = "✅ Teslim Edildi!"
+                task.wait(0.25)
             else
                 State.Status = "🔍 En iyi egg aranıyor..."
                 local target = FindBestTarget()
@@ -368,72 +320,87 @@ task.spawn(function()
 end)
 
 -- ======================================================================
--- ⚡ TÜM OYUN KODLARINI ÇEKİP DPASTE LİNKİ YAPMA FONKSİYONU
+-- ⚡ DPASTE LİNK OLUŞTURUCU (Hafifletilmiş & Garantili)
 -- ======================================================================
-local function DumpAllGameScripts(logCallback)
-    logCallback("Oyun kodları toplanıyor, bekle...")
+local function DumpCriticalScripts(onSuccess, onStatus)
+    onStatus("Kritik oyun kodları taranıyor...")
     task.wait(0.1)
 
     local output = {}
-    local header = string.rep("=", 80)
+    local header = string.rep("=", 70)
     table.insert(output, header)
-    table.insert(output, ("-- AEROSTEAL OYUN KODLARI DÖKÜMÜ"))
-    table.insert(output, ("-- PlaceId: %d | Tarih: %s"):format(game.PlaceId, os.date()))
+    table.insert(output, ("-- AEROSTEAL KRİTİK OYUN VERİLERİ & KODLARI"))
+    table.insert(output, ("-- Zaman: %s | PlaceId: %d"):format(os.date(), game.PlaceId))
     table.insert(output, header .. "\n")
 
-    local roots = {
-        { name = "ReplicatedStorage", inst = ReplicatedStorage },
-        { name = "PlayerScripts", inst = LocalPlayer:FindFirstChildOfClass("PlayerScripts") },
-    }
-
-    local count = 0
     local decompileFn = decompile or disassemble
+    local targets = {}
 
-    for _, r in ipairs(roots) do
-        if r.inst then
-            for _, desc in ipairs(r.inst:GetDescendants()) do
-                if desc:IsA("ModuleScript") or desc:IsA("LocalScript") then
-                    count = count + 1
-                    if count > 100 then break end
-
-                    table.insert(output, header)
-                    table.insert(output, ("-- [%d] %s (%s)"):format(count, desc:GetFullName(), desc.ClassName))
-                    table.insert(output, header)
-
-                    local extracted = false
-                    if typeof(decompileFn) == "function" then
-                        local okDec, code = pcall(decompileFn, desc)
-                        if okDec and type(code) == "string" and #code > 10 then
-                            table.insert(output, code)
-                            extracted = true
-                        end
-                    end
-
-                    if not extracted and desc:IsA("ModuleScript") then
-                        local okReq, res = pcall(require, desc)
-                        if okReq then
-                            pcall(function()
-                                table.insert(output, "return " .. HttpService:JSONEncode(res))
-                                extracted = true
-                            end)
-                        end
-                    end
-
-                    if not extracted then
-                        table.insert(output, "-- [Kod korumalı veya decompile edilemedi]")
-                    end
-                    table.insert(output, "\n\n")
-                end
-            end
+    -- Öncelikli ve kritik modülleri seç (Boyut patlamasını önler!)
+    local function AddTarget(inst)
+        if inst and (inst:IsA("ModuleScript") or inst:IsA("LocalScript")) then
+            targets[#targets + 1] = inst
         end
     end
 
+    -- ReplicatedStorage altındaki kritik dosyalar
+    if ReplicatedStorage:FindFirstChild("Client") then
+        for _, m in ipairs(ReplicatedStorage.Client:GetDescendants()) do AddTarget(m) end
+    end
+    if ReplicatedStorage:FindFirstChild("Data") then
+        for _, m in ipairs(ReplicatedStorage.Data:GetDescendants()) do AddTarget(m) end
+    end
+    if ReplicatedStorage:FindFirstChild("Shared") then
+        for _, m in ipairs(ReplicatedStorage.Shared:GetDescendants()) do
+            if #targets < 45 then AddTarget(m) end
+        end
+    end
+
+    local count = 0
+    for _, desc in ipairs(targets) do
+        count = count + 1
+        table.insert(output, header)
+        table.insert(output, ("-- [%d] %s (%s)"):format(count, desc:GetFullName(), desc.ClassName))
+        table.insert(output, header)
+
+        local extracted = false
+        if typeof(decompileFn) == "function" then
+            local okDec, code = pcall(decompileFn, desc)
+            if okDec and type(code) == "string" and #code > 5 then
+                table.insert(output, code)
+                extracted = true
+            end
+        end
+
+        if not extracted and desc:IsA("ModuleScript") then
+            local okReq, res = pcall(require, desc)
+            if okReq then
+                pcall(function()
+                    table.insert(output, "return " .. HttpService:JSONEncode(res))
+                    extracted = true
+                end)
+            end
+        end
+
+        if not extracted then
+            table.insert(output, "-- [Kod korumalı veya okunamadı]")
+        end
+        table.insert(output, "\n\n")
+    end
+
     local fullText = table.concat(output, "\n")
+    onStatus("Link üretiliyor (dpaste)...")
+
+    -- 1. Dosyaya yaz (Emülatör workspace)
+    if typeof(writefile) == "function" then
+        pcall(function() writefile("AeroSteal_Dump.lua", fullText) end)
+    end
+
+    -- 2. Web API isteği
     local req = request or http_request or (syn and syn.request) or (http and http.request)
-    local dpasteUrl = nil
+    local link = nil
 
     if req then
-        logCallback("İnternet linki oluşturuluyor...")
         local okPost, res = pcall(function()
             return req({
                 Url = "https://dpaste.org/api/",
@@ -443,40 +410,40 @@ local function DumpAllGameScripts(logCallback)
             })
         end)
         if okPost and res and res.Body then
-            dpasteUrl = string.match(res.Body, "https://dpaste%.org/[%w]+")
+            link = string.match(res.Body, "https://dpaste%.org/[%w]+")
         end
     end
 
-    if dpasteUrl then
-        if setclipboard then pcall(setclipboard, dpasteUrl) end
-        logCallback("🎉 LİNK HAZIR & KOPYALANDI: " .. dpasteUrl)
+    if link then
+        if setclipboard then pcall(setclipboard, link) end
+        onSuccess(link)
     else
-        if setclipboard then pcall(setclipboard, fullText) end
-        logCallback("Tamamlandı! Kodlar panoya kopyalandı.")
+        if setclipboard then pcall(setclipboard, fullText:sub(1, 4000)) end
+        onSuccess("Link sunucusu yanıt vermedi, dosya 'AeroSteal_Dump.lua' kaydedildi.")
     end
 end
 
 -- ======================================================================
--- GÖRSEL ARAYÜZ (Modern Cyber UI)
+-- ARAYÜZ (Gelişmiş Link Kutulu Cyber UI)
 -- ======================================================================
 local parentGui = nil
-pcall(function() parentGui = CoreGui end)
+pcall(function() parentGui = game:GetService("CoreGui") end)
 if not parentGui or not pcall(function() return parentGui.Name end) then
     parentGui = LocalPlayer:WaitForChild("PlayerGui")
 end
 
-local old = parentGui:FindFirstChild("AeroSteal_v9")
+local old = parentGui:FindFirstChild("AeroSteal_v95")
 if old then old:Destroy() end
 
 local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "AeroSteal_v9"
+ScreenGui.Name = "AeroSteal_v95"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.DisplayOrder = 999999
 ScreenGui.Parent = parentGui
 
 local MainFrame = Instance.new("Frame")
-MainFrame.Size = UDim2.new(0, 340, 0, 390)
-MainFrame.Position = UDim2.new(0.05, 0, 0.2, 0)
+MainFrame.Size = UDim2.new(0, 340, 0, 420)
+MainFrame.Position = UDim2.new(0.05, 0, 0.18, 0)
 MainFrame.BackgroundColor3 = Color3.fromRGB(15, 16, 22)
 MainFrame.BorderSizePixel = 0
 MainFrame.Active = true
@@ -500,7 +467,7 @@ Instance.new("UICorner", TopBar).CornerRadius = UDim.new(0, 12)
 local Title = Instance.new("TextLabel")
 Title.Size = UDim2.new(0.7, 0, 1, 0)
 Title.Position = UDim2.new(0.04, 0, 0, 0)
-Title.Text = "⚡ AEROSTEAL <font color=\"#818cf8\">v9.0 PRO</font>"
+Title.Text = "⚡ AEROSTEAL <font color=\"#818cf8\">v9.5 PRO</font>"
 Title.RichText = true
 Title.TextColor3 = Color3.fromRGB(255, 255, 255)
 Title.Font = Enum.Font.GothamBold
@@ -527,7 +494,7 @@ MinBtn.MouseButton1Click:Connect(function()
         MainFrame:TweenSize(UDim2.new(0, 340, 0, 42), "Out", "Quad", 0.2, true)
         MinBtn.Text = "□"
     else
-        MainFrame:TweenSize(UDim2.new(0, 340, 0, 390), "Out", "Quad", 0.2, true)
+        MainFrame:TweenSize(UDim2.new(0, 340, 0, 420), "Out", "Quad", 0.2, true)
         MinBtn.Text = "─"
     end
 end)
@@ -541,8 +508,8 @@ Content.Parent = MainFrame
 
 -- Durum Kutusu
 local StatusBox = Instance.new("TextLabel")
-StatusBox.Size = UDim2.new(0.92, 0, 0, 48)
-StatusBox.Position = UDim2.new(0.04, 0, 0.04, 0)
+StatusBox.Size = UDim2.new(0.92, 0, 0, 44)
+StatusBox.Position = UDim2.new(0.04, 0, 0.03, 0)
 StatusBox.BackgroundColor3 = Color3.fromRGB(22, 24, 32)
 StatusBox.TextColor3 = Color3.fromRGB(52, 211, 153)
 StatusBox.Font = Enum.Font.Gotham
@@ -552,10 +519,10 @@ StatusBox.Text = "Hazır. Auto Steal'i başlatabilirsin."
 StatusBox.Parent = Content
 Instance.new("UICorner", StatusBox).CornerRadius = UDim.new(0, 8)
 
--- Auto Steal Başlat / Durdur
+-- Auto Steal Butonu
 local ToggleBtn = Instance.new("TextButton")
-ToggleBtn.Size = UDim2.new(0.92, 0, 0, 44)
-ToggleBtn.Position = UDim2.new(0.04, 0, 0.20, 0)
+ToggleBtn.Size = UDim2.new(0.92, 0, 0, 42)
+ToggleBtn.Position = UDim2.new(0.04, 0, 0.17, 0)
 ToggleBtn.BackgroundColor3 = Color3.fromRGB(225, 29, 72)
 ToggleBtn.Text = "AUTO STEAL BAŞLAT"
 ToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -569,7 +536,6 @@ ToggleBtn.MouseButton1Click:Connect(function()
     if State.AutoSteal then
         ToggleBtn.BackgroundColor3 = Color3.fromRGB(16, 185, 129)
         ToggleBtn.Text = "AUTO STEAL: AKTİF"
-        StatusBox.Text = "Auto Steal Çalışıyor..."
     else
         ToggleBtn.BackgroundColor3 = Color3.fromRGB(225, 29, 72)
         ToggleBtn.Text = "AUTO STEAL BAŞLAT"
@@ -577,10 +543,10 @@ ToggleBtn.MouseButton1Click:Connect(function()
     end
 end)
 
--- Alan (Area) Seçici Butonu
+-- Bölge Seçici
 local AreaBtn = Instance.new("TextButton")
-AreaBtn.Size = UDim2.new(0.92, 0, 0, 36)
-AreaBtn.Position = UDim2.new(0.04, 0, 0.35, 0)
+AreaBtn.Size = UDim2.new(0.92, 0, 0, 34)
+AreaBtn.Position = UDim2.new(0.04, 0, 0.30, 0)
 AreaBtn.BackgroundColor3 = Color3.fromRGB(30, 32, 44)
 AreaBtn.Text = "Bölge: Tümü (En İyisi Önce)"
 AreaBtn.TextColor3 = Color3.fromRGB(220, 220, 230)
@@ -594,13 +560,12 @@ AreaBtn.MouseButton1Click:Connect(function()
     areaIdx = (areaIdx % #AREA_LIST) + 1
     State.SelectedArea = AREA_LIST[areaIdx]
     AreaBtn.Text = "Bölge: " .. State.SelectedArea
-    StatusBox.Text = "Hedef Bölge: " .. State.SelectedArea
 end)
 
--- Hız Ayar Butonları
+-- Hız Butonları
 local SpeedRow = Instance.new("Frame")
-SpeedRow.Size = UDim2.new(0.92, 0, 0, 32)
-SpeedRow.Position = UDim2.new(0.04, 0, 0.48, 0)
+SpeedRow.Size = UDim2.new(0.92, 0, 0, 30)
+SpeedRow.Position = UDim2.new(0.04, 0, 0.41, 0)
 SpeedRow.BackgroundTransparency = 1
 SpeedRow.Parent = Content
 
@@ -628,15 +593,14 @@ local function PickSpeed(val, btn)
         b.BackgroundColor3 = (b == btn) and Color3.fromRGB(99, 102, 241) or Color3.fromRGB(26, 28, 38)
     end
 end
-
 sp50.MouseButton1Click:Connect(function() PickSpeed(50, sp50) end)
 sp70.MouseButton1Click:Connect(function() PickSpeed(70, sp70) end)
 sp90.MouseButton1Click:Connect(function() PickSpeed(90, sp90) end)
 
--- Kodları Çek & Link Yap Butonu
+-- Kodları Çek Butonu
 local DumpBtn = Instance.new("TextButton")
-DumpBtn.Size = UDim2.new(0.92, 0, 0, 38)
-DumpBtn.Position = UDim2.new(0.04, 0, 0.61, 0)
+DumpBtn.Size = UDim2.new(0.92, 0, 0, 36)
+DumpBtn.Position = UDim2.new(0.04, 0, 0.52, 0)
 DumpBtn.BackgroundColor3 = Color3.fromRGB(79, 70, 229)
 DumpBtn.Text = "⚡ TÜM OYUN KODLARINI ÇEK & LİNK YAP"
 DumpBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -645,26 +609,44 @@ DumpBtn.TextSize = 12
 DumpBtn.Parent = Content
 Instance.new("UICorner", DumpBtn).CornerRadius = UDim.new(0, 8)
 
+-- DOĞRUDAN EKRANDA GÖRÜNEN KOPYALANABİLİR LİNK KUTUSU (TextBox)
+local LinkBox = Instance.new("TextBox")
+LinkBox.Size = UDim2.new(0.92, 0, 0, 34)
+LinkBox.Position = UDim2.new(0.04, 0, 0.64, 0)
+LinkBox.BackgroundColor3 = Color3.fromRGB(20, 22, 30)
+LinkBox.TextColor3 = Color3.fromRGB(129, 140, 248)
+LinkBox.Font = Enum.Font.Gotham
+LinkBox.TextSize = 11
+LinkBox.ClearTextOnFocus = false
+LinkBox.Text = "Link burada çıkacak (üzerine tıklayıp kopyala)"
+LinkBox.Parent = Content
+Instance.new("UICorner", LinkBox).CornerRadius = UDim.new(0, 6)
+local LinkStroke = Instance.new("UIStroke", LinkBox)
+LinkStroke.Thickness = 1
+LinkStroke.Color = Color3.fromRGB(45, 48, 64)
+
 DumpBtn.MouseButton1Click:Connect(function()
     task.spawn(function()
-        DumpAllGameScripts(function(t)
-            StatusBox.Text = t
+        DumpCriticalScripts(function(resUrl)
+            LinkBox.Text = resUrl
+            StatusBox.Text = "🎉 Link Oluştu! Aşağıdaki kutudan kopyala."
+        end, function(st)
+            StatusBox.Text = st
         end)
     end)
 end)
 
 -- Alt Bilgi
 local Footer = Instance.new("TextLabel")
-Footer.Size = UDim2.new(0.92, 0, 0, 30)
+Footer.Size = UDim2.new(0.92, 0, 0, 28)
 Footer.Position = UDim2.new(0.04, 0, 0.88, 0)
 Footer.BackgroundTransparency = 1
 Footer.TextColor3 = Color3.fromRGB(150, 150, 170)
 Footer.Font = Enum.Font.Gotham
 Footer.TextSize = 11
-Footer.Text = "Çalınan: 0 | Teslimat: SeparationLine"
+Footer.Text = "Çalınan: 0 | Teslim: 1-A (SeparationLine)"
 Footer.Parent = Content
 
--- Canlı Durum Döngüsü
 task.spawn(function()
     while true do
         if State.AutoSteal then
